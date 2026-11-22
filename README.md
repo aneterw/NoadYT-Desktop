@@ -68,6 +68,103 @@ NoadYT-Desktop_0.1.0_x64.msi
 - 字幕語言優先順序
 - 清除緩存
 
+## 快速開始（最快運行方法）
+
+如果你只想快速試用，請按照以下步驟：
+
+### 方法一：直接安裝 MSI（推薦）
+
+1. 從 [Releases](https://github.com/aneterw/NoadYT-Desktop/releases) 下載 `NoadYT-Desktop_0.1.0_x64.msi`
+2. 雙擊運行安裝程序，按照嚮導完成安裝
+3. 啟動 NoadYT-Desktop 應用程式
+4. 在搜尋框輸入關鍵字，點擊「搜尋」
+5. 點擊任一影片縮圖開始播放
+
+整個過程約需 2-3 分鐘，無需手動配置環境。
+
+### 方法二：從源代碼編譯運行（開發者）
+
+如果你需要修改源代碼或參與開發：
+
+#### 第一步：安裝依賴
+
+```bash
+# 克隆倉庫
+git clone https://github.com/aneterw/NoadYT-Desktop.git
+cd NoadYT-Desktop
+
+# 安裝 Node.js 依賴
+npm install
+
+# 安裝 Python 依賴
+pip install yt-dlp youtube_transcript_api
+```
+
+#### 第二步：啟動開發模式
+
+```bash
+# 啟動開發服務器
+npm run dev
+```
+
+這會同時啟動 Vite 開發服務器和 Tauri 應用程式，適用於開發和測試。
+
+#### 第三步：構建生產版本
+
+```bash
+# 構建前端
+npm run build
+
+# 構建 Tauri MSI 安裝程序
+npx tauri build
+```
+
+構建完成後，MSI 安裝程序位於：
+```
+src-tauri/target/release/bundle/msi/NoadYT-Desktop_0.1.0_x64.msi
+```
+
+## 部署說明
+
+### 生產環境部署
+
+NoadYT-Desktop 是一個桌面應用程式，不需要伺服器部署。用戶只需在本地 Windows 電腦上安裝 MSI 即可使用。
+
+### MSI 安裝程序構建（開發者）
+
+如果你需要構建自己的 MSI 安裝程序：
+
+```bash
+# 1. 安裝 Rust 編譯環境（如果尚未安裝）
+# 下載並安裝：https://rustup.rs/
+
+# 2. 安裝 Tauri CLI
+npm install -g @tauri-apps/cli
+
+# 3. 安裝 WebView2 Runtime（Windows 系統級依賴）
+# 下載：https://developer.microsoft.com/microsoft-edge/webview2/
+
+# 4. 安裝 Python 3.12 並配置 PATH
+pip install yt-dlp youtube_transcript_api
+
+# 5. 構建 MSI
+npm run build
+npx tauri build
+```
+
+構建完成後的 MSI 檔案位於：
+```
+src-tauri/target/release/bundle/msi/NoadYT-Desktop_0.1.0_x64.msi
+```
+
+### 部署檢查清單
+
+- [ ] Windows 10/11 系統
+- [ ] Python 3.12 已安裝並加入 PATH
+- [ ] `yt-dlp` 和 `youtube_transcript_api` 已安裝
+- [ ] WebView2 Runtime 已安裝
+- [ ] MSI 安裝程序已測試可正常安裝和運行
+
 ## 專案結構
 
 ```
