@@ -315,12 +315,14 @@ fn search_videos(input: SearchVideosInput) -> Result<SearchVideosOutput, String>
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GetStreamUrlInput {
+    #[serde(default)]
+    pub player_type: Option<String>, // "internal" | "external"
     video_id: String,
     resolution: Option<String>, // "auto" | "1080" | "720" | "480"
     subtitle_lang: Option<String>, // "auto" | "en" | "zh-Hans" | "zh-Hant" | "ja" | "es" | "de" | "fr"
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SubtitleTrack {
     language: String,
@@ -332,6 +334,7 @@ struct SubtitleTrack {
 #[serde(rename_all = "camelCase")]
 struct StreamResult {
     path: String,
+    audio_url: Option<String>, // 分離的音頻 URL（如果有的話）
     subtitles: Vec<SubtitleTrack>,
 }
 
@@ -362,27 +365,217 @@ fn get_stream_url(input: GetStreamUrlInput) -> Result<StreamResult, String> {
     //   用戶選擇的語言代碼（auto, en, zh-Hans, zh-Hant, ja, es, de, fr）
     let subtitle_mode = input.subtitle_lang.as_deref().unwrap_or("auto");
 
-    // 步驟 2：優先 download（帶字幕），失敗再 fallback 到串流
-    dlog!("[DEBUG get_stream_url] trying download... subtitle_mode={}", subtitle_mode);
-    let result = try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode);
-    if result.is_ok() {
-        dlog!("[DEBUG get_stream_url] download OK, returning");
-        return result;
-    }
-    dlog!("[DEBUG get_stream_url] download failed, will try stream: {}", result.as_ref().err().unwrap_or(&"unknown".to_string()));
+    // 步驟 2：根據播放器類型決定策略
+    let is_external = input.player_type.as_deref() == Some("external");
 
-    // download 失敗，fallback 到串流
-    dlog!("[DEBUG get_stream_url] trying stream...");
-    match try_stream_url(&input.video_id) {
-        Ok(result) => {
-            dlog!("[DEBUG get_stream_url] stream OK, returning");
-            return Ok(result);
+    // === 步驟 2：先獲取串流資訊（參考 NoadYTTV 的 getBestPlaybackInfo 邏輯）===
+    let stream_info = match try_stream_url_full(&input.video_id, "auto") {
+        Ok(info) => info,
+        Err(e) => {
+            dlog!("[DEBUG get_stream_url] Stream failed: {}, falling back to download", e);
+            // 串流完全失敗，直接下載
+            return try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode);
         }
-        Err(e) => dlog!("[DEBUG get_stream_url] stream failed: {}", e),
+    };
+
+    // === 步驟 3：根據播放器類型選擇最佳軌跡 ===
+    if is_external {
+        // 外部播放器：優先 DASH video+audio（高解析度），次選 Combined，最後 Download
+        dlog!("[DEBUG get_stream_url] External player mode - trying DASH video+audio first...");
+        if let Some((v_h, v_url)) = &stream_info.best_dash_video {
+            if let Some((a_h, a_url)) = &stream_info.best_dash_audio {
+                dlog!("[DEBUG get_stream_url] External: SELECTED DASH video={}p + audio={}p", v_h, a_h);
+                return Ok(StreamResult {
+                    path: v_url.clone(),
+                    audio_url: Some(a_url.clone()),
+                    subtitles: stream_info.subtitles.clone(),
+                });
+            }
+        }
+        // 沒有 DASH 分離軌跡，嘗試 Combined
+        if let Some((h, url)) = &stream_info.best_combined {
+            dlog!("[DEBUG get_stream_url] External: SELECTED COMBINED h={}p", h);
+            return Ok(StreamResult {
+                path: url.clone(),
+                audio_url: None,
+                subtitles: stream_info.subtitles.clone(),
+            });
+        }
+        // 沒有合適的串流，fallback 到 Download
+        dlog!("[DEBUG get_stream_url] External: No suitable stream, trying download...");
+        try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode)
+    } else {
+        // 內部播放器：Stream 優先（高品質、即時播放），失敗再 fallback 到 Download（帶字幕）
+        // 優先 Combined > DASH video+audio > manifest
+        if let Some((h, url)) = &stream_info.best_combined {
+            dlog!("[DEBUG get_stream_url] Internal: SELECTED COMBINED h={}p", h);
+            return Ok(StreamResult {
+                path: url.clone(),
+                audio_url: None,
+                subtitles: stream_info.subtitles.clone(),
+            });
+        }
+        if let Some((v_h, v_url)) = &stream_info.best_dash_video {
+            if let Some((a_h, a_url)) = &stream_info.best_dash_audio {
+                dlog!("[DEBUG get_stream_url] Internal: SELECTED DASH video={}p + audio={}p", v_h, a_h);
+                return Ok(StreamResult {
+                    path: v_url.clone(),
+                    audio_url: Some(a_url.clone()),
+                    subtitles: stream_info.subtitles.clone(),
+                });
+            }
+        }
+        if let Some(man_url) = &stream_info.manifest_url {
+            dlog!("[DEBUG get_stream_url] Internal: SELECTED manifest");
+            return Ok(StreamResult {
+                path: man_url.clone(),
+                audio_url: None,
+                subtitles: stream_info.subtitles.clone(),
+            });
+        }
+        // 都失敗，fallback 到 Download（帶字幕）
+        dlog!("[DEBUG get_stream_url] Internal: No suitable stream, trying download...");
+        try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode)
+    }
+}
+
+/// 步驟 2：串流分析（參考 NoadYTTV 的 getBestPlaybackInfo 邏輯）
+/// 收集所有軌跡：Combined、DASH-video、DASH-audio、manifest
+fn try_stream_url_full(video_id: &str, subtitle_mode: &str) -> Result<StreamInfo, String> {
+    dlog!("[DEBUG try_stream_url_full] START video_id={}", video_id);
+    let json = run_extractor(&["--info", video_id, subtitle_mode])?;
+    dlog!("[DEBUG try_stream_url_full] run_extractor OK, json_len={}", json.len());
+
+    let info = match extract_json_from_stdout(&json) {
+        Some(v) => v,
+        None => return Err("no JSON in stream response".to_string()),
+    };
+
+    let formats = info.get("formats").and_then(|v| v.as_array()).ok_or("no formats array")?;
+    dlog!("[DEBUG try_stream_url_full] total formats: {}", formats.len());
+
+    // 字幕軌跡
+    let mut subtitles: Vec<SubtitleTrack> = Vec::new();
+    let mut found_from_json = false;
+    if let Some(subs_arr) = info.get("subtitles").and_then(|v| v.as_array()) {
+        for sub in subs_arr {
+            let language = sub.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = sub.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut sub_path = sub.get("local_path")
+                .or(sub.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 轉換為 Windows 本地路徑（外部播放器需要本地路徑，不是 file:/// URL）
+            if sub_path.starts_with("file:///") {
+                sub_path = sub_path.strip_prefix("file:///").unwrap_or(&sub_path).to_string();
+                sub_path = sub_path.replace('/', "\\");
+            }
+            if !sub_path.is_empty() {
+                dlog!("[DEBUG try_stream_url_full] Found subtitle: {} - {}", language, sub_path);
+                subtitles.push(SubtitleTrack { language, name, path: sub_path });
+                found_from_json = true;
+            }
+        }
     }
 
-    // 兩者都失敗，返回 download 的錯誤
-    result
+    // 如果从 JSON 没有找到字幕，尝试从本地字幕目录扫描（Python 可能已经下载了但没返回 JSON）
+    if subtitles.is_empty() {
+        dlog!("[DEBUG try_stream_url_full] No subtitles from JSON, scanning local subtitle dir...");
+        let subtitle_dir = env::temp_dir().join("NoadYT-Desktop").join("subtitles");
+        if let Ok(entries) = std::fs::read_dir(&subtitle_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if let Some(ext) = path.extension() {
+                    if ext == "vtt" || ext == "VTT" {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with(&format!("{}_", video_id)) {
+                                let language = name.split('_').nth(1).unwrap_or("unknown").to_string();
+                                let language_clone = language.clone();
+                                let sub_path = path.to_string_lossy().replace('\\', "/");
+                                dlog!("[DEBUG try_stream_url_full] Found local subtitle: {} - {}", language, sub_path);
+                                subtitles.push(SubtitleTrack {
+                                    language,
+                                    name: format!("{} ({})", language_clone, sub_path.split('.').next().unwrap_or(&sub_path)),
+                                    path: sub_path.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    dlog!("[DEBUG try_stream_url_full] Total subtitle tracks: {}", subtitles.len());
+
+    // 收集所有軌跡
+    let mut best_combined: Option<(u64, String)> = None;
+    let mut best_dash_video: Option<(u64, String)> = None;
+    let mut best_dash_audio: Option<(u64, String)> = None;
+    let mut manifest_url: Option<String> = None;
+
+    for f in formats.iter() {
+        let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("");
+        let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
+        let url = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let m_url = f.get("manifest_url").and_then(|v| v.as_str()).unwrap_or("");
+        let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        if url.is_empty() && m_url.is_empty() { continue; }
+
+        if !m_url.is_empty() && manifest_url.is_none() {
+            manifest_url = Some(m_url.to_string());
+        }
+
+        if !url.is_empty() && !acodec.is_empty() && acodec != "none" {
+            if let Some((cur_h, _)) = best_combined {
+                if height > cur_h {
+                    best_combined = Some((height, url.to_string()));
+                }
+            } else {
+                best_combined = Some((height, url.to_string()));
+            }
+        }
+
+        if !url.is_empty() && (acodec.is_empty() || acodec == "none") {
+            if let Some((cur_h, _)) = best_dash_video {
+                if height > cur_h {
+                    best_dash_video = Some((height, url.to_string()));
+                }
+            } else {
+                best_dash_video = Some((height, url.to_string()));
+            }
+        }
+
+        if !url.is_empty() && (vcodec.is_empty() || vcodec == "none") && !acodec.is_empty() && acodec != "none" {
+            if let Some((cur_ab, _)) = best_dash_audio {
+                best_dash_audio = Some((cur_ab, url.to_string()));
+            } else {
+                best_dash_audio = Some((0, url.to_string()));
+            }
+        }
+    }
+
+    dlog!("[DEBUG try_stream_url_full] Combined: {:?}, DASH-video: {:?}, DASH-audio: {:?}, manifest: {:?}",
+        best_combined.as_ref().map(|(h,_)| *h), best_dash_video.as_ref().map(|(h,_)| *h), best_dash_audio.is_some(), manifest_url.is_some());
+
+    Ok(StreamInfo {
+        best_combined,
+        best_dash_video,
+        best_dash_audio,
+        manifest_url,
+        subtitles,
+    })
+}
+
+/// 串流選擇結果
+#[derive(Debug)]
+struct StreamInfo {
+    best_combined: Option<(u64, String)>,
+    best_dash_video: Option<(u64, String)>,
+    best_dash_audio: Option<(u64, String)>,
+    manifest_url: Option<String>,
+    subtitles: Vec<SubtitleTrack>,
 }
 
 /// 步驟 2：download+ffmpeg（Android TV 做法：下載+ffmpeg 合併成 MP4，帶字幕）
@@ -474,7 +667,7 @@ fn try_download(video_id: &str, max_h: u64, ffmpeg_str: &str, subtitle_mode: &st
                 }
 
                 dlog!("[DEBUG try_download] subtitle tracks from vtt scan: {}", subtitles.len());
-                return Ok(StreamResult { path: file_uri, subtitles });
+                return Ok(StreamResult { path: file_uri, audio_url: None, subtitles });
             }
 
             return Err("no JSON in download response and no cached MP4 found".to_string());
@@ -516,9 +709,16 @@ fn try_download(video_id: &str, max_h: u64, ffmpeg_str: &str, subtitle_mode: &st
         for sub in subs_arr {
             let language = sub.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let name = sub.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let mut sub_path = sub.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut sub_path = sub.get("local_path")
+                .or(sub.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             if sub_path.contains('\\') {
-                sub_path = format!("file:///{}", sub_path.replace('\\', "/"));
+                // Already Windows path, keep as is
+            } else if sub_path.starts_with("file:///") {
+                sub_path = sub_path.strip_prefix("file:///").unwrap_or(&sub_path).to_string();
+                sub_path = sub_path.replace('/', "\\");
             }
             if !sub_path.is_empty() {
                 let track = SubtitleTrack { language, name: name.clone(), path: sub_path };
@@ -537,6 +737,7 @@ fn try_download(video_id: &str, max_h: u64, ffmpeg_str: &str, subtitle_mode: &st
 
     Ok(StreamResult {
         path: file_uri,
+        audio_url: None,
         subtitles,
     })
 }
@@ -567,9 +768,11 @@ fn clear_cache() -> Result<bool, String> {
 }
 
 /// 步驟 3：串流 fallback（--info，無字幕）
+/// 舊的串流選擇函數（已棄用，保留備用）
+#[allow(dead_code)]
 fn try_stream_url(video_id: &str) -> Result<StreamResult, String> {
     dlog!("[DEBUG try_stream_url] START video_id={}", video_id);
-    let json = run_extractor(&["--info", video_id, "none"])?;
+    let json = run_extractor(&["--info", video_id, "auto"])?;
     dlog!("[DEBUG try_stream_url] run_extractor OK, json_len={}", json.len());
     dlog!("[DEBUG try_stream_url] raw stdout (first 200 chars): {:?}", json.chars().take(200).collect::<String>());
 
@@ -618,7 +821,7 @@ fn try_stream_url(video_id: &str) -> Result<StreamResult, String> {
 
         let best_url = av_url.or(video_only_url).or(manifest_url).ok_or("no playable stream found")?;
         dlog!("[DEBUG try_stream_url] stream URL: {}", best_url);
-        Ok(StreamResult { path: best_url, subtitles: Vec::new() })
+        Ok(StreamResult { path: best_url, audio_url: None, subtitles: Vec::new() })
 }
 
 #[derive(Debug, Deserialize)]
@@ -672,10 +875,10 @@ fn get_channel_videos(input: GetChannelVideosInput) -> Result<GetChannelVideosOu
 }
 
 #[command]
-fn play_with_external_player(video_path: String, subtitle_paths: Vec<String>, player: String) -> Result<String, String> {
+fn play_with_external_player(video_path: String, audio_path: Option<String>, subtitle_paths: Vec<String>, player: String) -> Result<String, String> {
     use std::process::Command;
 
-    dlog!("[DEBUG play_with_external_player] START player={} video_path={} subtitle_count={}", player, video_path, subtitle_paths.len());
+    dlog!("[DEBUG play_with_external_player] START player={} video_path={} audio_path={:?} subtitle_count={}", player, video_path, audio_path, subtitle_paths.len());
 
     // 根據播放器類型尋找對應的可執行檔路徑
     let exe = match player.as_str() {
@@ -707,43 +910,56 @@ fn play_with_external_player(video_path: String, subtitle_paths: Vec<String>, pl
         dlog!("[DEBUG play_with_external_player] subtitle[{}]: {}", i, sub);
     }
 
-    // 檢查影片檔案是否存在
-    if !Path::new(&video_path).exists() {
+    // 檢查影片檔案是否存在（僅限本地檔案，遠端 URL 不檢查）
+    let is_remote_url = video_path.starts_with("http://") || video_path.starts_with("https://");
+    if !is_remote_url && !Path::new(&video_path).exists() {
         dlog!("[DEBUG play_with_external_player] ERROR: video file not found: {}", video_path);
         return Err(format!("影片檔案不存在: {}", video_path));
     }
-    dlog!("[DEBUG play_with_external_player] video file exists OK");
+    dlog!("[DEBUG play_with_external_player] video file/URL OK: is_remote={}", is_remote_url);
 
     let mut cmd = Command::new(&exe);
 
-        // PotPlayer: 影片路徑先加入，字幕用 /sub= 參數
-        if player == "potplayer" {
-            cmd.arg(&video_path);
-            for sub in &subtitle_paths {
-                cmd.arg(format!("/sub={}", sub));
-            }
-            // 備援：同名 .vtt 複製
-            for sub in &subtitle_paths {
-                if let Some(video_dir) = Path::new(&video_path).parent() {
-                    if let Some(video_stem) = Path::new(&video_path).file_stem() {
-                        let sub_name = video_stem.to_string_lossy() + ".vtt";
-                        let sub_dest = video_dir.join(&*sub_name);
-                        if let Ok(_) = std::fs::metadata(sub) {
-                            if let Ok(_) = std::fs::copy(sub, &sub_dest) {
-                                dlog!("[DEBUG play_with_external_player] copied subtitle to: {}", sub_dest.display());
-                            }
-                        }
-                    }
-                }
-            }
-        } else if player == "mpv" || player == "vlc" {
-            cmd.arg(&video_path);
-            for sub in &subtitle_paths {
-                cmd.arg("--sub-file").arg(sub);
-            }
-        } else {
-            cmd.arg(&video_path);
+    // 輔助函數：將 file:/// URL 或任意路徑轉換為純 Windows 路徑
+    fn to_windows_path(p: &str) -> String {
+        p.strip_prefix("file:///")
+            .unwrap_or(p)
+            .replace('/', "\\")
+    }
+
+    // 準備字幕參數
+    let subs_args: Vec<String> = if is_remote_url {
+        subtitle_paths.clone()
+    } else {
+        subtitle_paths.iter().map(|s| to_windows_path(s)).collect()
+    };
+
+    // 準備音頻參數（PotPlayer/mpv/VLC 支援獨立音軌）
+    let audio_arg = audio_path.as_deref();
+
+    // PotPlayer: 影片路徑先加入，字幕用 /sub=，音頻用 /audio=
+    if player == "potplayer" {
+        cmd.arg(&video_path);
+        if let Some(audio) = audio_arg {
+            cmd.arg(format!("/audio={}", audio));
         }
+        for sub in &subs_args {
+            cmd.arg(format!("/sub={}", sub));
+        }
+    } else if player == "mpv" || player == "vlc" {
+        cmd.arg(&video_path);
+        if let Some(audio) = audio_arg {
+            cmd.arg(audio);
+        }
+        for sub in &subs_args {
+            cmd.arg("--sub-file").arg(sub);
+        }
+    } else {
+        cmd.arg(&video_path);
+        if let Some(audio) = audio_arg {
+            cmd.arg(audio);
+        }
+    }
 
     // 分離進程，不等待播放器關閉
     dlog!("[DEBUG play_with_external_player] spawning process...");

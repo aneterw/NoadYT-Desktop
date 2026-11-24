@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
-import Hls from 'hls.js'
+import shaka from 'shaka-player'
 
 type Page = 'search' | 'player' | 'env' | 'channels' | 'channel-videos' | 'settings'
 
@@ -18,6 +18,7 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false)
   const [streamUrl, setStreamUrl] = useState<string>('')
   const [streamSubtitles, setStreamSubtitles] = useState<any[]>([])
+  const [pendingStreamUrl, setPendingStreamUrl] = useState<{url: string, subtitles: any[]} | null>(null)
   const [videoTitle, setVideoTitle] = useState<string>('')
   const [maxResults, setMaxResults] = useState<number>(60)
   const [resolution, setResolution] = useState<string>('auto')
@@ -29,11 +30,11 @@ export default function App() {
   const [subtitleFontSize, setSubtitleFontSize] = useState<number>(32)
   const [styleEl, setStyleEl] = useState<HTMLStyleElement | null>(null)
   const [debugCollapsed, setDebugCollapsed] = useState<boolean>(true)
-  const [subtitleText, setSubtitleText] = useState<string>('')
-  const [subtitleActive, setSubtitleActive] = useState<boolean>(false)
+  const [subtitleText, _setSubtitleText] = useState<string>('')
+  const [subtitleActive, _setSubtitleActive] = useState<boolean>(false)
 
   const videoRef = useRef<HTMLVideoElement>(null)
-  const hlsRef = useRef<any>(null)
+  const shakaRef = useRef<shaka.Player | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const historyListRef = useRef<HTMLUListElement>(null)
 
@@ -112,16 +113,6 @@ export default function App() {
     }
   }, [])
 
-  // 清理 hls.js
-  useEffect(() => {
-    return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy()
-        hlsRef.current = null
-      }
-    }
-  }, [])
-
   const addHistory = useCallback((kw: string) => {
     if (!kw.trim()) return
     setHistory(prev => {
@@ -135,40 +126,10 @@ export default function App() {
     const entry = `[${new Date().toLocaleTimeString()}] ${msg}`
     setDebugInfo(prev => [...prev.slice(-49), entry])
     console.log(entry)
+    invoke('write_log', { message: entry }).catch(e => console.error('Failed to write log:', e))
   }
 
-  // 解析 VTT 內容為時間段陣列
-  const parseVttCues = (vttContent: string): Array<{start: number, end: number, text: string}> => {
-    const cues: Array<{start: number, end: number, text: string}> = []
-    const lines = vttContent.split(/\r?\n/)
-    let i = 0
-    addDebug('parseVttCues: total lines: ' + lines.length)
-    while (i < lines.length) {
-      const line = lines[i].trim()
-      // 匹配時間行：00:00:00.199 --> 00:00:07.230 align:center position:50%
-      // 也支持：00:00.199 --> 00:00:07.230
-      const timeMatch = line.match(/(\d{1,2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{1,2}):(\d{2}):(\d{2})\.(\d{3})/)
-      if (timeMatch) {
-        const start = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]) + parseInt(timeMatch[4]) / 1000
-        const end = parseInt(timeMatch[5]) * 3600 + parseInt(timeMatch[6]) * 60 + parseInt(timeMatch[7]) + parseInt(timeMatch[8]) / 1000
-        // 收集後續的文本行，直到空行
-        i++
-        const textLines: string[] = []
-        while (i < lines.length && lines[i].trim() !== '') {
-          textLines.push(lines[i].trim())
-          i++
-        }
-        const text = textLines.join(' ')
-        cues.push({ start, end, text })
-        addDebug('cue found: start=' + start + ', end=' + end + ', text=' + text.substring(0, 30))
-      }
-      i++
-    }
-    addDebug('parseVttCues: total cues: ' + cues.length)
-    return cues
-  }
-
-  // 應用字幕大小到 video 元素，使用動態 style 標籤（::cue 對 CSS 變數支持有限）
+  // 應用字幕大小到 video 元素，使用動態 style 標籤
   useEffect(() => {
     if (!styleEl) {
       const el = document.createElement('style')
@@ -256,240 +217,252 @@ export default function App() {
     }
   }
 
+  // 載入 Shaka Player 所需的 DASH/MPD 或 HLS/М3U8 manifest
+  // 針對 YouTube 的簽名 URL，先透過 Rust 後端下載 manifest bytes，再轉為 blob://
+  const loadManifestViaBackend = useCallback(async (manifestUrl: string): Promise<string | null> => {
+    try {
+      addDebug('[SHAKA] Fetching manifest via backend...')
+      const manifestContent: string = await invoke('fetch_manifest_url', { manifestUrl })
+      addDebug('[SHAKA] Manifest fetched, length=' + manifestContent.length)
+
+      // 轉為 blob URL
+      const blob = new Blob([manifestContent], { type: 'application/vnd.apple.mpegurl' })
+      const blobUrl = URL.createObjectURL(blob)
+      addDebug('[SHAKA] Created blob URL')
+      return blobUrl
+    } catch (e: any) {
+      console.error('[SHAKA] Backend manifest fetch failed:', e)
+      addDebug('[SHAKA] Backend fetch error: ' + (e.message || String(e)))
+      return null
+    }
+  }, [])
+
   const playVideo = async (video: any) => {
     setVideoTitle(video.title || '無標題')
-    if (hlsRef.current) {
-      hlsRef.current.destroy()
-      hlsRef.current = null
-    }
     try {
       setLoading(true)
       setError('')
-      const result: any = await invoke('get_stream_url', { input: { videoId: video.id, resolution, subtitleLang: subtitleLang || 'auto' } })
+      const result: any = await invoke('get_stream_url', { input: { videoId: video.id, resolution, subtitleLang: subtitleLang || 'auto', playerType: playerType } })
       const url: string = result.path
-      setStreamUrl(url)
       console.log('[DEBUG playVideo] stream URL:', url)
       console.log('[DEBUG playVideo] subtitle tracks:', result.subtitles?.length || 0)
+      addDebug('[PLAYVIDEO] Full stream URL: ' + url)
 
-      // 本地文件（download 模式）：使用 convertFileSrc 轉換為 asset:// URL，WebView2 可內建播放
-      if (url.startsWith('file://')) {
-        const localPath = url.slice(8).replace(/\\/g, '/')
-        console.log('[DEBUG playVideo] converting local path:', localPath)
-        const assetUrl = convertFileSrc(localPath)
-        console.log('[DEBUG playVideo] asset URL:', assetUrl)
-        setStreamUrl(assetUrl)
-        setStreamSubtitles(result.subtitles || [])
-        setPage('player')
-        return
+      // 外部播放器模式：直接調用系統播放器
+      if (playerType === 'external') {
+        addDebug('[PLAYVIDEO] External player mode')
+        const subs = result.subtitles || []
+        const subPaths = subs.filter((s: any) => s.path).map((s: any) => s.path)
+        addDebug('[PLAYVIDEO] Subtitle paths: ' + JSON.stringify(subPaths))
+
+        try {
+          const ret: any = await invoke('play_with_external_player', {
+            videoPath: url,
+            audioPath: result.audioUrl || null,
+            subtitlePaths: subPaths,
+            player: externalPlayer,
+          })
+          addDebug('[PLAYVIDEO] External player started: ' + ret)
+          setLoading(false)
+          return
+        } catch (err: any) {
+          console.error('[DEBUG playVideo] External player error:', err)
+          setLoading(false)
+          setError('無法啟動 ' + externalPlayer + ': ' + (err.message || String(err)))
+          return
+        }
       }
 
-      // 播放邏輯由 useEffect 監聽 streamUrl 負責（串流 URL）
-      setStreamUrl(url)
-      setStreamSubtitles(result.subtitles || [])
+      // 內建播放器模式（Shaka）
+      // 預載入字幕內容到快取
+      if (result.subtitles && result.subtitles.length > 0) {
+        for (const sub of result.subtitles) {
+          if (!sub.path) continue
+          try {
+            const bytes: number[] = await invoke('read_binary_file', { path: sub.path })
+            const vttContent = new TextDecoder('utf-8').decode(new Uint8Array(bytes))
+            ;(window as any).__noadyt_subtitles_cache = (window as any).__noadyt_subtitles_cache || {}
+            ;(window as any).__noadyt_subtitles_cache[sub.path] = vttContent
+          } catch (e: any) {
+            console.error('[DEBUG playVideo] Failed to preload subtitle:', e.message)
+          }
+        }
+      }
+
       setPage('player')
+      setStreamUrl(url)               // 立即設定，觸發 useEffect 播放
+      setPendingStreamUrl({ url, subtitles: result.subtitles || [] })
+      addDebug('[PLAYVIDEO] Got URL: ' + url)
+      addDebug('[PLAYVIDEO] Subtitle tracks: ' + (result.subtitles?.length || 0))
       return
     } catch (err: any) {
+      console.error('[DEBUG playVideo] Error:', err)
       setLoading(false)
       setError('無法取得串流網址: ' + (err.message || String(err)))
     }
   }
 
-  // 當 streamUrl 變化時執行播放（確保 player 頁面已掛載 <video> 元素）
-    useEffect(() => {
-      ;(async () => {
-    addDebug('streamUrl changed: ' + streamUrl)
-    addDebug('streamSubtitles count: ' + (streamSubtitles?.length || 0))
+  // 當 streamUrl 變化時執行播放
+  useEffect(() => {
+    ;(async () => {
+      addDebug('streamUrl changed: ' + streamUrl)
+      addDebug('streamSubtitles count: ' + (streamSubtitles?.length || 0))
 
-    const videoEl = videoRef.current
-    if (!videoEl) {
-      addDebug('videoEl is null, returning')
-      return
-    }
+      if (page !== 'player') {
+        addDebug('not on player page, skipping')
+        return
+      }
 
-    const subs = streamSubtitles
+      if (!streamUrl) {
+        addDebug('streamUrl is empty, returning')
+        return
+      }
 
-    if (!streamUrl) {
-      addDebug('streamUrl is empty, returning')
-      return
-    }
+      const videoEl = videoRef.current
+      if (!videoEl) {
+        addDebug('videoRef not ready')
+        return
+      }
 
-    // 清理舊軌道
-    const existingTracks = videoEl.querySelectorAll('track')
-    addDebug('existing tracks before cleanup: ' + existingTracks.length)
-    existingTracks.forEach((t: HTMLTrackElement) => t.remove())
+      // 判斷是本地檔案還是遠端串流
+      const isLocalFile = streamUrl.startsWith('file://') || streamUrl.startsWith('asset://')
 
-    // 添加字幕軌道（不使用 <track> 元素，改為自定義渲染，可完全控制字體大小）
-    addDebug('subs is array: ' + Array.isArray(subs) + ', length: ' + (subs?.length || 0))
-    if (subs && Array.isArray(subs) && subs.length > 0) {
-      addDebug('processing ' + subs.length + ' subtitle tracks')
-      // 讀取第一個字幕文件的內容
-      const sub = subs[0]
-      let trackSrc = sub.path
-      addDebug('subtitle[0] original path: ' + trackSrc)
-      addDebug('subtitle[0] name: ' + sub.name + ', language: ' + sub.language)
-      if (trackSrc) {
-        let localPath = ''
-        if (trackSrc.startsWith('file://')) {
-          localPath = trackSrc.slice(8).replace(/\\/g, '/')
-          addDebug('subtitle[0] converted localPath: ' + localPath)
-        } else if (trackSrc.includes(':\\')) {
-          localPath = trackSrc.replace(/\\/g, '/')
-          addDebug('subtitle[0] converted localPath (backslash): ' + localPath)
+      if (isLocalFile) {
+        addDebug('LOCAL FILE mode')
+        let playSrc = streamUrl
+        if (streamUrl.startsWith('file://')) {
+          let localPath = streamUrl.slice(8).replace(/\\/g, '/')
+          playSrc = convertFileSrc(localPath)
+          addDebug('converted to asset URL: ' + playSrc)
         }
-        if (localPath) {
-          // 透過 Tauri 命令讀取 VTT 檔案內容
-          try {
-            const bytes: number[] = await invoke('read_binary_file', { path: localPath })
-            // 使用 TextDecoder 正確解碼 UTF-8（支持日語等多字節字符）
-            const vttContent = new TextDecoder('utf-8').decode(new Uint8Array(bytes))
-            addDebug('subtitle[0] VTT content loaded, length: ' + vttContent.length)
-            addDebug('subtitle[0] VTT first 200 chars: ' + vttContent.substring(0, 200))
-
-            // 解析 VTT 內容為時間段陣列
-            const cues = parseVttCues(vttContent)
-            addDebug('subtitle[0] parsed ' + cues.length + ' cues')
-            if (cues.length > 0) {
-              addDebug('subtitle[0] first cue: start=' + cues[0].start + ', end=' + cues[0].end + ', text=' + cues[0].text.substring(0, 50))
-            }
-
-            // 監聽視頻時間更新，顯示對應字幕
-            let firstTimeUpdateLogged = false
-            const onTimeUpdate = () => {
-              const currentTime = videoEl.currentTime
-              if (!firstTimeUpdateLogged) {
-                addDebug('subtitle[0] first timeupdate: currentTime=' + currentTime.toFixed(3) + ', cues=' + cues.length)
-                if (cues.length > 0) {
-                  addDebug('subtitle[0] first cue: start=' + cues[0].start + ', end=' + cues[0].end)
-                }
-                firstTimeUpdateLogged = true
-              }
-              const activeCue = cues.find(c => currentTime >= c.start && currentTime < c.end)
-              if (activeCue) {
-                if (!subtitleActive || subtitleText !== activeCue.text) {
-                  setSubtitleText(activeCue.text)
-                  setSubtitleActive(true)
-                }
-              } else {
-                if (subtitleActive) {
-                  setSubtitleText('')
-                  setSubtitleActive(false)
-                }
-              }
-            }
-
-            videoEl.removeEventListener('timeupdate', onTimeUpdate)
-            videoEl.addEventListener('timeupdate', onTimeUpdate)
-
-            // 視頻加載後立即檢查當前時間，避免跳過前幾秒的字幕
-            const onLoadedMetadata = () => {
-              const currentTime = videoEl.currentTime
-              addDebug('subtitle[0] loadedmetadata: currentTime=' + currentTime.toFixed(3))
-              const activeCue = cues.find(c => currentTime >= c.start && currentTime < c.end)
-              if (activeCue) {
-                if (!subtitleActive || subtitleText !== activeCue.text) {
-                  setSubtitleText(activeCue.text)
-                  setSubtitleActive(true)
-                  addDebug('subtitle[0] showing on load: t=' + currentTime.toFixed(3) + ', text=' + activeCue.text.substring(0, 30))
-                }
-              }
-            }
-            videoEl.removeEventListener('loadedmetadata', onLoadedMetadata)
-            videoEl.addEventListener('loadedmetadata', onLoadedMetadata)
-
-            // 視頻結束時清除字幕
-            const onEnded = () => {
-              setSubtitleText('')
-              setSubtitleActive(false)
-            }
-            videoEl.removeEventListener('ended', onEnded)
-            videoEl.addEventListener('ended', onEnded)
-
-          } catch (e: any) {
-            addDebug('subtitle[0] read_binary_file failed: ' + e.message)
-          }
-        }
-      }
-    } else {
-      addDebug('no subtitles to add')
-    }
-
-    // 播放
-    const isLocalFile = streamUrl.startsWith('file://') || streamUrl.startsWith('asset://')
-    const isM3u8 = streamUrl.toLowerCase().includes('.m3u8') || streamUrl.toLowerCase().includes('m3u8')
-
-    if (isLocalFile) {
-      let playSrc = streamUrl
-      if (streamUrl.startsWith('file://')) {
-        let localPath = streamUrl.slice(8).replace(/\\/g, '/')
-        playSrc = convertFileSrc(localPath)
-        addDebug('converted to asset URL: ' + playSrc)
-      }
-      addDebug('playing local file: ' + playSrc)
-      videoEl.src = playSrc
-      videoEl.onloadedmetadata = () => {
-        addDebug('tauri URI metadata loaded')
-        setError('')
-        setLoading(false)
-      }
-      videoEl.onerror = (_e: any) => {
-        if (!videoEl.error) return
-        const msg = videoEl.error.message || ''
-        if (msg.includes('Empty src')) return
-        setLoading(false)
-        setError('<video> 無法播放此檔案: ' + msg)
-      }
-      videoEl.play().catch((e: any) => {
-        addDebug('video play failed: ' + (e.message || String(e)))
-        setLoading(false)
-        setError('影片播放失敗: ' + (e.message || String(e)))
-      })
-    } else if (isM3u8 && Hls.isSupported()) {
-      if (hlsRef.current) hlsRef.current.destroy()
-      const hls = new Hls()
-      hlsRef.current = hls
-      hls.loadSource(streamUrl)
-      hls.attachMedia(videoEl)
-      hls.on(Hls.Events.ERROR, (_ev: any, data: any) => {
-        console.error('[DEBUG useEffect] hls.js ERROR:', data)
-        setLoading(false)
-        setError('hls.js 播放錯誤: ' + (data.details || String(data)))
-      })
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        console.log('[DEBUG useEffect] hls.js MANIFEST_PARSED, attempting play')
-        videoEl.play().then(() => {
+        videoEl.src = playSrc
+        videoEl.onloadedmetadata = () => {
+          addDebug('local file metadata loaded')
+          setError('')
           setLoading(false)
-        }).catch((e: any) => {
-          console.error('[DEBUG useEffect] video play failed after manifest:', e)
+        }
+        videoEl.onerror = (_e: any) => {
+          if (!videoEl.error) return
+          const msg = videoEl.error.message || ''
+          if (msg.includes('Empty src')) return
+          setLoading(false)
+          setError('<video> 無法播放此檔案: ' + msg)
+        }
+        videoEl.play().catch((e: any) => {
+          addDebug('video play failed: ' + (e.message || String(e)))
           setLoading(false)
           setError('影片播放失敗: ' + (e.message || String(e)))
         })
-      })
-    } else {
-      videoEl.src = streamUrl
-      videoEl.onerror = (_e: any) => {
-        console.error('[DEBUG useEffect] video element error:', _e)
-        setLoading(false)
-        setError('<video> 無法播放此格式: ' + (videoEl.error?.message || '未知錯誤'))
-      }
-      videoEl.play().then(() => {
-        setLoading(false)
-      }).catch((e: any) => {
-        console.error('[DEBUG useEffect] video play failed:', e)
-        setLoading(false)
-        setError('影片播放失敗: ' + (e.message || String(e)))
-      })
-    }
+      } else {
+        // 遠端串流 → Shaka Player
+        addDebug('STREAM mode, using Shaka Player: ' + streamUrl.slice(0, 60) + '...')
 
-    return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy()
-        hlsRef.current = null
+        // 清理舊 Shaka 實例
+        if (shakaRef.current) {
+          shakaRef.current.destroy()
+          shakaRef.current = null
+        }
+
+        const container = videoEl.parentElement as HTMLDivElement | null
+        if (!container) {
+          addDebug('[SHAKA] Container not found')
+          return
+        }
+
+        // 判斷是否是 YouTube manifest URL（需要後端協助下載）
+        const isManifestUrl = streamUrl.includes('manifest/') || streamUrl.endsWith('.m3u8') || streamUrl.endsWith('.mpd')
+
+        let finalUrl = streamUrl
+
+        if (isManifestUrl) {
+          addDebug('[SHAKA] Detected manifest URL, fetching via backend...')
+          const blobUrl = await loadManifestViaBackend(streamUrl)
+          if (blobUrl) {
+            finalUrl = blobUrl
+            addDebug('[SHAKA] Using blob URL: ' + blobUrl)
+          } else {
+            addDebug('[SHAKA] Backend fetch failed, trying direct load')
+          }
+        }
+
+        // 初始化 Shaka Player
+        try {
+          const player = new shaka.Player(videoEl)
+          shakaRef.current = player
+
+          // 註冊網路請求過濾器：將所有 *.googlevideo.com 和 *.youtube.com 請求轉發到本地代理
+          if (player.getNetworkingEngine) {
+            const eng = player.getNetworkingEngine()
+            if (eng) {
+              eng.registerRequestFilter((_type: any, request: any) => {
+                const urls = request?.uris || []
+                for (let i = 0; i < urls.length; i++) {
+                  const url = urls[i]
+                  if (url && (url.includes('googlevideo.com') || url.includes('youtube.com'))) {
+                    // 檢查是否已經被代理過
+                    if (!url.startsWith('http://127.0.0.1:18923/')) {
+                      // 使用 encodeURIComponent 编码 URL（但保留 path）
+                      const encodedUrl = encodeURIComponent(url)
+                      request.uris[i] = `http://127.0.0.1:18923/${encodedUrl}`
+                      addDebug('[SHAKA] Proxied request: ' + url.slice(0, 60) + '... -> 127.0.0.1:18923')
+                    }
+                  }
+                }
+              })
+            }
+          }
+
+          // 監聽各種事件
+          player.addEventListener('error', (e: any) => {
+            console.error('[SHAKA ERROR]', e)
+            addDebug('[SHAKA] Error event: ' + JSON.stringify(e.detail))
+            setLoading(false)
+            setError('Shaka 播放錯誤: ' + (e.detail?.code || e.detail?.message || String(e)))
+          })
+
+          player.addEventListener('loading', () => {
+            addDebug('[SHAKA] Loading started...')
+          })
+
+          player.addEventListener('loaded', () => {
+            addDebug('[SHAKA] Loaded successfully!')
+          })
+
+          player.addEventListener('playing', () => {
+            addDebug('[SHAKA] Playing!')
+            setLoading(false)
+            setError('')
+          })
+
+          player.addEventListener('pause', () => {
+            addDebug('[SHAKA] Paused')
+          })
+
+          addDebug('[SHAKA] Calling load() with: ' + finalUrl.slice(0, 80))
+          await player.load(finalUrl)
+          addDebug('[SHAKA] Load completed successfully')
+          setStreamUrl(streamUrl)
+          setStreamSubtitles(streamSubtitles)
+        } catch (e: any) {
+          console.error('[SHAKA EXCEPTION]', e)
+          addDebug('[SHAKA] Exception: ' + e.message)
+          setLoading(false)
+          setError('Shaka 初始化失敗: ' + (e.message || String(e)))
+        }
       }
-      videoEl.pause()
-      videoEl.src = ''
-    }
-  })()
-  }, [streamUrl])
+
+      return () => {
+        if (shakaRef.current) {
+          shakaRef.current.destroy()
+          shakaRef.current = null
+        }
+        if (videoEl) {
+          videoEl.pause()
+          videoEl.src = ''
+        }
+      }
+    })()
+  }, [streamUrl, page])
 
   const togglePlay = () => {
     const video = videoRef.current
@@ -502,9 +475,9 @@ export default function App() {
     setPage('search')
     setStreamUrl('')
     setVideoTitle('')
-    if (hlsRef.current) {
-      hlsRef.current.destroy()
-      hlsRef.current = null
+    if (shakaRef.current) {
+      shakaRef.current.destroy()
+      shakaRef.current = null
     }
     const video = videoRef.current
     if (video) {
@@ -519,21 +492,21 @@ export default function App() {
     setError('')
     try {
       invoke('get_channel_videos', { channelUrl: channel.url || channel.channel_url || '' })
-        .then((result: any) => {
-          setLoading(false)
-          if (!result.ok) {
-            setError(result.error || '取得頻道影片失敗')
-            return
-          }
-          const data = result.data
-          const list = Array.isArray(data) ? data : (data?.entries || data?.videos || [])
-          setVideos(list)
-          setPage('channel-videos')
-        })
-        .catch((err: any) => {
-          setLoading(false)
-          setError(err.message || '取得頻道影片出錯')
-        })
+          .then((result: any) => {
+            setLoading(false)
+            if (!result.ok) {
+              setError(result.error || '取得頻道影片失敗')
+              return
+            }
+            const data = result.data
+            const list = Array.isArray(data) ? data : (data?.entries || data?.videos || [])
+            setVideos(list)
+            setPage('channel-videos')
+          })
+          .catch((err: any) => {
+            setLoading(false)
+            setError(err.message || '取得頻道影片出錯')
+          })
     } catch (err: any) {
       setLoading(false)
       setError(err.message || '取得頻道影片出錯')
@@ -652,7 +625,7 @@ export default function App() {
     </nav>
   )
 
-  // 播放頁面
+  // 播放頁面 — 顯示 <video ref={videoRef}> 作為 Shaka 容器
   if (page === 'player') {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6 flex flex-col">
@@ -668,7 +641,8 @@ export default function App() {
         )}
 
         <div className="flex-1 bg-black rounded-lg border border-slate-800 flex items-center justify-center min-h-[500px] relative">
-          {streamUrl ? (
+          {/* 只要有待播放的 URL 就顯示 <video> */}
+          {(streamUrl || pendingStreamUrl?.url) ? (
             <>
               <video ref={videoRef} className="w-full h-full object-contain bg-black" autoPlay controls />
               {/* 自定義字幕顯示區域 */}
@@ -818,7 +792,8 @@ export default function App() {
             <h2 className="text-lg font-semibold mb-4">緩存管理</h2>
             <button
               onClick={clearCache}
-              disabled={cacheStatus === '清除中...'}              className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 text-sm font-medium">
+              disabled={cacheStatus === '清除中...'}
+              className="px-4 py-2 rounded-lg bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 text-sm font-medium">
               {cacheStatus === '清除中...' ? '清除中...' : '清除下載與字幕緩存'}
             </button>
             {cacheStatus && !cacheStatus.startsWith('清除中') && (

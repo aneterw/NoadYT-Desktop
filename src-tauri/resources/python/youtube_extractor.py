@@ -271,71 +271,135 @@ class YouTubeExtractor:
             else:
                 print(f"[Subtitle DEBUG] Using preferred language: {target_langs}", file=sys.stderr)
 
+        def _make_track(lang_code: str, source_tag: str, track_type: str, path: Optional[str], is_auto: bool) -> Dict:
+            """Create a subtitle track dict.
+            track_type: 'YTA' or 'TimedText' to distinguish the two sources.
+            """
+            return {
+                'language': lang_code,
+                'name': f'{lang_code} ({source_tag}, {track_type})',
+                'url': '',
+                'local_path': path or '',
+                'ext': 'vtt',
+                'is_auto': is_auto,
+            }
+
+        # ── Try 1: YTA for target language (manual or auto-generated) ──
         try:
-            # find_transcript prioritizes manual over auto-generated
             transcript = transcript_list.find_transcript(target_langs)
         except Exception as e:
             logger.warning(f"[Subtitle] find_transcript failed for {target_langs}: {e}")
-            return tracks
+            transcript = None
 
-        lang_code = transcript.language_code
-        source_tag = "manual" if not transcript.is_generated else "auto"
-        print(f"[Subtitle DEBUG] Locked: {transcript.language} ({lang_code}) | source: {source_tag.upper()}", file=sys.stderr)
+        target_lang_code = None
+        target_source_tag = None
+        if transcript is not None:
+            target_lang_code = transcript.language_code
+            target_source_tag = "manual" if not transcript.is_generated else "auto"
+            print(f"[Subtitle DEBUG] Target: {transcript.language} ({target_lang_code}) | {target_source_tag.upper()}", file=sys.stderr)
 
-        # ── Download 1: YTA → clean standard VTT ──
-        yta_path = None
-        try:
-            fetched_data = transcript.fetch()
-            yta_vtt = vtt_formatter.format_transcript(fetched_data)
-            if yta_vtt.strip():
-                yta_filename = f"sub_{video_id}_{lang_code}_{source_tag}_yta.vtt"
-                yta_path = os.path.join(cache_dir, yta_filename)
-                with open(yta_path, 'w', encoding='utf-8') as f:
-                    f.write(yta_vtt)
-                print(f"[Subtitle DEBUG] YTA VTT saved: {yta_path}", file=sys.stderr)
-                tracks.append({
-                    'language': lang_code,
-                    'name': f'{lang_code} (YTA)',
-                    'url': '',
-                    'local_path': yta_path,
-                    'ext': 'vtt',
-                    'is_auto': transcript.is_generated,
-                })
-        except Exception as e:
-            print(f"[Subtitle DEBUG] YTA download failed: {e}", file=sys.stderr)
+        # ── Try 1: YTA for target language (with JSON3 fallback) ──
+        yta_success = False
+        if transcript is not None:
+            lang_code = target_lang_code
+            source_tag = target_source_tag
+            try:
+                fetched_data = transcript.fetch()
+                yta_vtt = vtt_formatter.format_transcript(fetched_data)
+                if yta_vtt.strip():
+                    yta_filename = f"sub_{video_id}_{lang_code}_{source_tag}_yta.vtt"
+                    yta_path = os.path.join(cache_dir, yta_filename)
+                    with open(yta_path, 'w', encoding='utf-8') as f:
+                        f.write(yta_vtt)
+                    print(f"[Subtitle DEBUG] YTA VTT saved: {yta_path}", file=sys.stderr)
+                    tracks.append(_make_track(lang_code, source_tag, "YTA", yta_path, transcript.is_generated))
+                    yta_success = True
+            except Exception as e:
+                print(f"[Subtitle DEBUG] YTA download failed: {e}", file=sys.stderr)
+                # Fallback to JSON3 method (bypasses YTA API limitation)
+                print(f"[Subtitle DEBUG] Trying JSON3 fallback for {lang_code}...", file=sys.stderr)
+                json3_path = self._fetch_yta_json3(lang_code)
+                if json3_path and os.path.exists(json3_path):
+                    print(f"[Subtitle DEBUG] JSON3 VTT saved: {json3_path}", file=sys.stderr)
+                    tracks.append(_make_track(lang_code, source_tag, "YTA(JSON3)", json3_path, transcript.is_generated))
+                    yta_success = True
 
-        # ── Download 2: TimedText native VTT ──
-        timedtext_path = None
-        try:
-            # transcript._url is the internal timedtext signature URL
-            tts_url = f"{transcript._url}&fmt=vtt"
-            import urllib.request
-            req = urllib.request.Request(tts_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read().decode('utf-8', errors='replace')
-            if raw.strip().startswith('WEBVTT'):
-                # Patch alignment: center + bottom
-                fixed = (raw
-                         .replace('align:start position:0%', 'align:center position:50%')
-                         .replace('align:start', 'align:center'))
-                fixed = _re.sub(r'<[^>]+>', '', fixed)
-                tt_filename = f"sub_{video_id}_{lang_code}_{source_tag}_timedtext.vtt"
-                timedtext_path = os.path.join(cache_dir, tt_filename)
-                with open(timedtext_path, 'w', encoding='utf-8') as f:
-                    f.write(fixed)
-                print(f"[Subtitle DEBUG] TimedText VTT saved: {timedtext_path}", file=sys.stderr)
-                tracks.append({
-                    'language': lang_code,
-                    'name': f'{lang_code} (TimedText)',
-                    'url': tts_url,
-                    'local_path': timedtext_path,
-                    'ext': 'vtt',
-                    'is_auto': transcript.is_generated,
-                })
-            else:
-                print(f"[Subtitle DEBUG] TimedText not VTT (starts with: {raw.strip()[:40]}...)", file=sys.stderr)
-        except Exception as e:
-            print(f"[Subtitle DEBUG] TimedText download failed: {e}", file=sys.stderr)
+        # ── Try 2: TimedText for target language (ALWAYS attempt if YTA succeeded too) ──
+        if transcript is not None:
+            lang_code = target_lang_code
+            source_tag = target_source_tag
+            print(f"[Subtitle DEBUG] Trying timedtext for {lang_code}...", file=sys.stderr)
+            try:
+                tts_url = f"{transcript._url}&fmt=vtt"
+                import urllib.request
+                req = urllib.request.Request(tts_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw = resp.read().decode('utf-8', errors='replace')
+                if raw.strip().startswith('WEBVTT'):
+                    fixed = (raw
+                             .replace('align:start position:0%', 'align:center position:50%')
+                             .replace('align:start', 'align:center'))
+                    fixed = _re.sub(r'<[^>]+>', '', fixed)
+                    tt_filename = f"sub_{video_id}_{lang_code}_{source_tag}_timedtext.vtt"
+                    timedtext_path = os.path.join(cache_dir, tt_filename)
+                    with open(timedtext_path, 'w', encoding='utf-8') as f:
+                        f.write(fixed)
+                    print(f"[Subtitle DEBUG] TimedText VTT saved: {timedtext_path}", file=sys.stderr)
+                    tracks.append(_make_track(lang_code, source_tag, "TimedText", timedtext_path, transcript.is_generated))
+                else:
+                    print(f"[Subtitle DEBUG] TimedText not VTT (starts with: {raw.strip()[:40]}...)", file=sys.stderr)
+            except Exception as e:
+                print(f"[Subtitle DEBUG] TimedText download failed: {e}", file=sys.stderr)
+
+        # ── Try 3: Fallback to en timedtext (only if nothing found yet) ──
+        if not tracks:
+            if 'en' in available_codes:
+                print("[Subtitle DEBUG] No target subtitles, trying en fallback...", file=sys.stderr)
+                try:
+                    en_transcript = transcript_list.find_transcript(['en'])
+                    en_lang = en_transcript.language_code
+                    en_source = "manual" if not en_transcript.is_generated else "auto"
+                    print(f"[Subtitle DEBUG] EN fallback: {en_transcript.language} ({en_lang}) | {en_source.upper()}", file=sys.stderr)
+                    # Try YTA first for en
+                    en_yta_ok = False
+                    try:
+                        fetched = en_transcript.fetch()
+                        vtt = vtt_formatter.format_transcript(fetched)
+                        if vtt.strip():
+                            fn = f"sub_{video_id}_en_{en_source}_yta.vtt"
+                            fp = os.path.join(cache_dir, fn)
+                            with open(fp, 'w', encoding='utf-8') as f:
+                                f.write(vtt)
+                            print(f"[Subtitle DEBUG] EN YTA VTT saved: {fp}", file=sys.stderr)
+                            tracks.append(_make_track(en_lang, en_source, "YTA", fp, en_transcript.is_generated))
+                            en_yta_ok = True
+                    except Exception as e:
+                        print(f"[Subtitle DEBUG] EN YTA failed: {e}", file=sys.stderr)
+                    # Then timedtext for en
+                    if not en_yta_ok:
+                        try:
+                            tts = f"{en_transcript._url}&fmt=vtt"
+                            import urllib.request
+                            req = urllib.request.Request(tts, headers={'User-Agent': 'Mozilla/5.0'})
+                            with urllib.request.urlopen(req, timeout=15) as resp:
+                                raw = resp.read().decode('utf-8', errors='replace')
+                            if raw.strip().startswith('WEBVTT'):
+                                fixed = (raw
+                                         .replace('align:start position:0%', 'align:center position:50%')
+                                         .replace('align:start', 'align:center'))
+                                fixed = _re.sub(r'<[^>]+>', '', fixed)
+                                fn = f"sub_{video_id}_en_{en_source}_timedtext.vtt"
+                                fp = os.path.join(cache_dir, fn)
+                                with open(fp, 'w', encoding='utf-8') as f:
+                                    f.write(fixed)
+                                print(f"[Subtitle DEBUG] EN TimedText VTT saved: {fp}", file=sys.stderr)
+                                tracks.append(_make_track(en_lang, en_source, "TimedText", fp, en_transcript.is_generated))
+                            else:
+                                print("[Subtitle DEBUG] EN TimedText not VTT", file=sys.stderr)
+                        except Exception as e:
+                            print(f"[Subtitle DEBUG] EN TimedText failed: {e}", file=sys.stderr)
+                except Exception as e:
+                    print(f"[Subtitle DEBUG] EN fallback failed: {e}", file=sys.stderr)
 
         if not tracks:
             print(f"[Subtitle DEBUG] No subtitle tracks downloaded for {video_id}", file=sys.stderr)
