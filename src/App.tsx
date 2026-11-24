@@ -258,7 +258,7 @@ export default function App() {
         try {
           const ret: any = await invoke('play_with_external_player', {
             videoPath: url,
-            audioPath: result.audioUrl || null,
+            audioUrl: result.audioUrl || null,
             subtitlePaths: subPaths,
             player: externalPlayer,
           })
