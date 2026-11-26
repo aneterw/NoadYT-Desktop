@@ -51,7 +51,7 @@ export interface AppSettings {
 export type AppLanguage = 'zh-Hant' | 'zh-Hans' | 'en' | 'ja' | 'es'
 export type MediaType = 'videos' | 'channels'
 export type MaxResolution = 'auto' | '1080' | '720' | '480' | '360'
-export type SubtitleLanguage = 'auto' | 'zh-Hant' | 'zh-Hans' | 'en' | 'ja' | 'ko' | 'es' | 'de' | 'fr'
+export type SubtitleLanguage = 'auto' | 'none' | 'zh-Hant' | 'zh-Hans' | 'en' | 'ja' | 'ko' | 'es' | 'de' | 'fr'
 export type PlayerType = 'internal' | 'external'
 export type ExternalPlayer = 'vlc' | 'mpv'
 

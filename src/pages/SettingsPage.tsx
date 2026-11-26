@@ -6,7 +6,7 @@ import type {
   ExternalPlayer,
 } from '@/lib/types'
 import { t } from '@/lib/i18n'
-import { detectPlayers } from '@/lib/api'
+import { detectPlayers, openUrl } from '@/lib/api'
 import {
   useApp,
   RESOLUTION_OPTIONS,
@@ -293,6 +293,23 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
                         </div>
                       )
                     })}
+                  </div>
+                )}
+                {/* MPV 未偵測到：直播必須用 MPV，給官網下載按鈕 */}
+                {playerPaths && !playerPaths.mpv && (
+                  <div className="px-3 py-3 rounded-lg border border-[#f59e0b]/40 bg-[#f59e0b]/10 space-y-2">
+                    <p className="text-xs text-[#fbbf24] flex items-start gap-2">
+                      <svg className="w-4 h-4 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.545 0 2.807-1.262 2.807-2.81V5.808c0-1.549-1.262-2.81-2.807-2.81H4.938C3.393 3 2.131 4.262 2.131 5.81v10.384C2.131 17.738 3.393 19 4.938 19z" />
+                      </svg>
+                      {t('mpvRequiredHint', langKey)}
+                    </p>
+                    <button
+                      onClick={() => { void openUrl('https://mpv.io/installation/') }}
+                      className="px-3 py-1.5 rounded text-xs font-medium bg-[#27272a] border border-[#f59e0b]/40 text-[#fbbf24] hover:bg-[#3f3f46] transition-colors"
+                    >
+                      {t('goToMpvSite', langKey)} ↗
+                    </button>
                   </div>
                 )}
               </div>

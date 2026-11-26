@@ -1070,7 +1070,14 @@ def play_video(video_id: str, player_pref: str, subtitle_lang: str, max_resoluti
     import tempfile
 
     url = build_youtube_url(video_id)
-    target_langs = [subtitle_lang] if subtitle_lang and subtitle_lang not in ('auto', 'none', '') else ['zh-TW', 'zh-Hant', 'zh-Hans', 'zh', 'en', 'ja']
+    # 字幕語言：'none'/'' = 不要字幕（PREFERRED_LANGUAGES = []，不下載）；
+    # 'auto' = 依優先清單自動偵測；其他 = 指定語言
+    if subtitle_lang in ('none', ''):
+        target_langs = []
+    elif subtitle_lang == 'auto':
+        target_langs = ['zh-TW', 'zh-Hant', 'zh-Hans', 'zh', 'en', 'ja']
+    else:
+        target_langs = [subtitle_lang]
     parsed_res = parse_max_resolution(max_resolution)
     res_label = f'Max {parsed_res}p' if parsed_res else 'auto (Best)'
 

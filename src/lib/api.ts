@@ -109,6 +109,11 @@ export async function readBinaryFile(path: string): Promise<Uint8Array> {
   return callCommand<Uint8Array>('read_binary_file', { path })
 }
 
+/** 以系統預設瀏覽器開啟 URL */
+export async function openUrl(url: string): Promise<boolean> {
+  return callSimpleCommand<boolean>('open_url', { url })
+}
+
 /** 啟動外部播放器（使用 Python run19.py 的完整播放邏輯） */
 export async function playVideoExternal(
   videoId: string,

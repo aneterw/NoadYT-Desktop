@@ -59,6 +59,8 @@ struct StreamResult {
     path: String,
     audio_url: Option<String>,
     subtitles: Vec<SubtitleTrack>,
+    /// 串流所需的 User-Agent（YouTube DASH 串流需要，否則 403/黑屏；下載檔案為 None）
+    user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +71,8 @@ struct StreamInfo {
     best_dash_audio: Option<(u64, String)>,
     manifest_url: Option<String>,
     subtitles: Vec<SubtitleTrack>,
+    /// 串流 URL 所需的 User-Agent（取自 formats[].http_headers，YouTube 防 403）
+    user_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -92,40 +96,26 @@ struct GetStreamUrlInput {
 fn get_stream_url(input: GetStreamUrlInput) -> Result<StreamResult, String> {
     dlog!("[DEBUG get_stream_url] START video_id={} resolution={:?} player_type={:?}", input.video_id, input.resolution, input.player_type);
 
-    // 解析 resolution
+    // 解析 resolution：auto = 不設上限（取最高品質）
     let max_h = match input.resolution.as_deref() {
-        None | Some("auto") => 1080u64,
-        Some(h) => h.parse::<u64>().unwrap_or(1080),
+        None | Some("auto") => u64::MAX,
+        Some(h) => h.parse::<u64>().unwrap_or(u64::MAX),
     };
 
     // 判断是否为外部播放器模式
     let is_external = input.player_type.as_deref() == Some("external");
 
-    // 获取 ffmpeg 路径（與 exe 同目錄的 resources/ffmpeg/ffmpeg.exe，MSI 打包后會隨程式一起安裝）
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("failed to get current exe path: {}", e))?;
-    let dir = exe_path.parent().ok_or("failed to get exe parent directory")?;
-    let ffmpeg_path = dir.join("resources").join("ffmpeg").join("ffmpeg.exe");
-    let ffmpeg_str = ffmpeg_path.to_str().unwrap_or("");
-
     // 步骤 1：決定 subtitle_mode（Python 端用來控制字幕語言偏好）
     let subtitle_mode = input.subtitle_lang.as_deref().unwrap_or("auto");
 
-    // === 步驟 2：先獲取串流資訊 ===
-    let stream_info = match try_stream_url_full(&input.video_id, subtitle_mode) {
-        Ok(info) => info,
-        Err(e) => {
-            dlog!("[DEBUG get_stream_url] Stream failed: {}, falling back to download", e);
-            return try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode);
-        }
-    };
+    // === 步驟 2：獲取串流資訊（純串流，不做 download） ===
+    let stream_info = try_stream_url_full(&input.video_id, subtitle_mode, max_h)
+        .map_err(|e| format!("無法取得串流: {}", e))?;
 
-    // === 步驟 3：根據播放器類型選擇最佳軌跡 ===
+    // === 步驟 3：根據播放器類型選擇最佳軌跡（純串流，無 download fallback） ===
     if is_external {
         // 外部播放器：直接傳遞串流 URL（視訊 + 音訊），讓播放器自己處理合併
-        // 優先 DASH video（高解析度）+ DASH audio
-        // 次选：Combined（單一文件，PotPlayer 可直接播放）
-        // 最後：Download（帶字幕，最穩定）
+        // 優先 DASH video（高解析度）+ DASH audio，次选 Combined
         if let Some((v_h, v_url)) = &stream_info.best_dash_video {
             if let Some((a_h, a_url)) = &stream_info.best_dash_audio {
                 // 直接傳遞兩個 URL 給外部播放器，不下載音頻到本地
@@ -134,32 +124,26 @@ fn get_stream_url(input: GetStreamUrlInput) -> Result<StreamResult, String> {
                     path: v_url.clone(),
                     audio_url: Some(a_url.clone()),
                     subtitles: stream_info.subtitles.clone(),
+                    user_agent: stream_info.user_agent.clone(),
                 });
             }
         }
-        // 沒有 DASH 分離軌跡，尝试 Combined（單一文件，PotPlayer 可直接播放）
+        // 沒有 DASH 分離軌跡，尝试 Combined（單一文件）
         if let Some((h, url)) = &stream_info.best_combined {
             dlog!("[DEBUG get_stream_url] External: SELECTED COMBINED h={}p", h);
             return Ok(StreamResult {
                 path: url.clone(),
                 audio_url: None,
                 subtitles: stream_info.subtitles.clone(),
+                user_agent: stream_info.user_agent.clone(),
             });
         }
-        // 沒有合適的串流，fallback 到 Download
-        dlog!("[DEBUG get_stream_url] External: No suitable stream, trying download...");
-        try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode)
+        Err(format!(
+            "沒有可用的串流軌道（解析度上限 {}），請換一台影片或提高解析度上限",
+            input.resolution.as_deref().unwrap_or("auto")
+        ))
     } else {
-        // 内部播放器：Stream 优先（高品質、即時播放），失敗再 fallback 到 Download（帶字幕）
-        // 优先 Combined > DASH video+audio > manifest
-        if let Some((h, url)) = &stream_info.best_combined {
-            dlog!("[DEBUG get_stream_url] Internal: SELECTED COMBINED h={}p", h);
-            return Ok(StreamResult {
-                path: url.clone(),
-                audio_url: None,
-                subtitles: stream_info.subtitles.clone(),
-            });
-        }
+        // 内部播放器：DASH video + audio 優先（可選高畫質），其次 Combined
         if let Some((v_h, v_url)) = &stream_info.best_dash_video {
             if let Some((a_h, a_url)) = &stream_info.best_dash_audio {
                 dlog!("[DEBUG get_stream_url] Internal: SELECTED DASH video={}p + audio={}p", v_h, a_h);
@@ -167,26 +151,29 @@ fn get_stream_url(input: GetStreamUrlInput) -> Result<StreamResult, String> {
                     path: v_url.clone(),
                     audio_url: Some(a_url.clone()),
                     subtitles: stream_info.subtitles.clone(),
+                    user_agent: stream_info.user_agent.clone(),
                 });
             }
         }
-        if let Some(man_url) = &stream_info.manifest_url {
-            dlog!("[DEBUG get_stream_url] Internal: SELECTED manifest");
+        if let Some((h, url)) = &stream_info.best_combined {
+            dlog!("[DEBUG get_stream_url] Internal: SELECTED COMBINED h={}p", h);
             return Ok(StreamResult {
-                path: man_url.clone(),
+                path: url.clone(),
                 audio_url: None,
                 subtitles: stream_info.subtitles.clone(),
+                user_agent: stream_info.user_agent.clone(),
             });
         }
-        // 都失敗，fallback 到 Download（帶字幕）
-        dlog!("[DEBUG get_stream_url] Internal: No suitable stream, trying download...");
-        try_download(&input.video_id, max_h, &ffmpeg_str, subtitle_mode)
+        Err(format!(
+            "沒有可用的串流軌道（解析度上限 {}），請換一台影片或提高解析度上限",
+            input.resolution.as_deref().unwrap_or("auto")
+        ))
     }
 }
 
 /// 步骤 2：串流分析（参考 NoadYTTV 的 getBestPlaybackInfo 逻辑）
-/// 收集所有軌跡：Combined、DASH-video、DASH-audio、manifest
-fn try_stream_url_full(video_id: &str, subtitle_mode: &str) -> Result<StreamInfo, String> {
+/// 收集所有軌跡：Combined、DASH-video、DASH-audio、manifest（依 max_h 過濾）
+fn try_stream_url_full(video_id: &str, subtitle_mode: &str, max_h: u64) -> Result<StreamInfo, String> {
     dlog!("[DEBUG try_stream_url_full] START video_id={}", video_id);
     let json = run_extractor(&["--info", video_id, subtitle_mode])?;
     dlog!("[DEBUG try_stream_url_full] run_extractor OK, json_len={}", json.len());
@@ -221,6 +208,7 @@ fn try_stream_url_full(video_id: &str, subtitle_mode: &str) -> Result<StreamInfo
     let mut best_dash_video: Option<(u64, String)> = None;   // 純視訊（DASH）
     let mut best_dash_audio: Option<(u64, String)> = None;   // 純音頻（DASH）
     let mut manifest_url: Option<String> = None;
+    let mut user_agent: Option<String> = None;                // 串流 URL 所需的 User-Agent（YouTube 防 403）
 
     for f in formats.iter() {
         let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("");
@@ -231,13 +219,39 @@ fn try_stream_url_full(video_id: &str, subtitle_mode: &str) -> Result<StreamInfo
 
         if url.is_empty() && m_url.is_empty() { continue; }
 
+        // 解析度上限：含影片的軌道（combined / dash video / manifest）不超過 max_h
+        // 純音訊軌（vcodec=none）不受高度限制
+        let has_video = !vcodec.is_empty() && vcodec != "none";
+        if has_video && height > 0 && height > max_h { continue; }
+
+        // 從 formats[].http_headers 抓 User-Agent（YouTube DASH 串流必備，缺失會 403 黑屏）
+        if user_agent.is_none() {
+            if let Some(h) = f.get("http_headers") {
+                let ua = h.get("User-Agent")
+                    .or_else(|| h.get("user-agent"))
+                    .and_then(|v| v.as_str());
+                if let Some(ua) = ua {
+                    if !ua.is_empty() {
+                        user_agent = Some(ua.to_string());
+                        dlog!("[DEBUG try_stream_url] User-Agent captured: {} (len={})", ua, ua.len());
+                    }
+                }
+            }
+        }
+
         // 記錄 manifest URL
         if !m_url.is_empty() && manifest_url.is_none() {
             manifest_url = Some(m_url.to_string());
         }
 
-        // 收集 Combined（有聲有影）軌道
-        if !url.is_empty() && !acodec.is_empty() && acodec != "none" {
+        // 收集 Combined（真正有聲有影）軌道 — vcodec 與 acodec 必須同時存在
+        // 純音訊軌（vcodec=none）不視為 combined，否則內建播放器會拿到無畫面的 URL 導致黑屏
+        if !url.is_empty()
+            && !vcodec.is_empty()
+            && vcodec != "none"
+            && !acodec.is_empty()
+            && acodec != "none"
+        {
             if let Some((cur_h, _)) = best_combined {
                 if height > cur_h {
                     best_combined = Some((height, url.to_string()));
@@ -277,8 +291,8 @@ fn try_stream_url_full(video_id: &str, subtitle_mode: &str) -> Result<StreamInfo
         }
     }
 
-    dlog!("[DEBUG try_stream_url_full] Combined: {:?}, DASH-video: {:?}, DASH-audio: {:?}, manifest: {:?}",
-        best_combined.as_ref().map(|(h,_)| *h), best_dash_video.as_ref().map(|(h,_)| *h), best_dash_audio.is_some(), manifest_url.is_some());
+    dlog!("[DEBUG try_stream_url_full] Combined: {:?}, DASH-video: {:?}, DASH-audio: {:?}, manifest: {:?}, user_agent: {:?}",
+        best_combined.as_ref().map(|(h,_)| *h), best_dash_video.as_ref().map(|(h,_)| *h), best_dash_audio.is_some(), manifest_url.is_some(), user_agent.as_deref());
 
     Ok(StreamInfo {
         best_combined,
@@ -286,123 +300,10 @@ fn try_stream_url_full(video_id: &str, subtitle_mode: &str) -> Result<StreamInfo
         best_dash_audio,
         manifest_url,
         subtitles,
+        user_agent,
     })
 }
 
-/// 步驟 2：download+ffmpeg（Android TV 做法：下載+ffmpeg 合併成 MP4，帶字幕）
-fn try_download(video_id: &str, max_h: u64, ffmpeg_str: &str, subtitle_mode: &str) -> Result<StreamResult, String> {
-    let json = run_extractor(&["--download", video_id, &max_h.to_string(), ffmpeg_str, subtitle_mode])?;
-    dlog!("[DEBUG try_download] stdout (first 200 chars): {:?}", &json[..json.len().min(200)]);
-
-    let info = match extract_json_from_stdout(&json) {
-        Some(v) => v,
-        None => {
-            dlog!("[DEBUG try_download] JSON parse failed, scanning cache dir for {}", video_id);
-            let cache_dir = env::temp_dir().join("NoadYT-Desktop").join("downloads");
-
-            if !cache_dir.exists() {
-                return Err("no JSON in download response and cache dir not found".to_string());
-            }
-
-            let mut mp4_path: Option<std::path::PathBuf> = None;
-            let mut vtt_files: Vec<std::path::PathBuf> = Vec::new();
-
-            if let Ok(entries) = std::fs::read_dir(&cache_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let path = entry.path();
-                    if let Some(ext) = path.extension() {
-                        if ext == "mp4" || ext == "MP4" {
-                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                if name.starts_with(video_id) {
-                                    if name == format!("{}.mp4", video_id) {
-                                        mp4_path = Some(path.clone());
-                                    } else if mp4_path.is_none() {
-                                        mp4_path = Some(path.clone());
-                                    }
-                                    dlog!("[DEBUG try_download] found mp4: {}", name);
-                                }
-                            }
-                        } else if ext == "vtt" || ext == "VTT" {
-                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                if name.starts_with(video_id) {
-                                    vtt_files.push(path.clone());
-                                    dlog!("[DEBUG try_download] found vtt: {}", name);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if mp4_path.is_none() {
-                let direct_path = cache_dir.join(format!("{}.mp4", video_id));
-                if direct_path.exists() {
-                    mp4_path = Some(direct_path);
-                }
-            }
-
-            if let Some(mp4) = mp4_path {
-                dlog!("[DEBUG try_download] found cached MP4: {:?}", mp4);
-                let file_uri = format!("file:///{}", mp4.to_string_lossy().replace('\\', "/"));
-
-                let mut subtitles: Vec<SubtitleTrack> = Vec::new();
-                vtt_files.sort_by(|a, b| {
-                    let name_a = a.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    let name_b = b.file_name().unwrap_or_default().to_string_lossy().to_string();
-                    let a_is_tt = name_a.contains("TimedText");
-                    let b_is_tt = name_b.contains("TimedText");
-                    match (a_is_tt, b_is_tt) {
-                        (true, false) => std::cmp::Ordering::Less,
-                        (false, true) => std::cmp::Ordering::Greater,
-                        _ => name_a.cmp(&name_b),
-                    }
-                });
-                for sub in &vtt_files {
-                    let sub_path = sub.to_string_lossy().replace('\\', "/").to_string();
-                    let language = sub.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-                    let name = language.clone();
-                    subtitles.push(SubtitleTrack { language, name, path: sub_path });
-                }
-
-                return Ok(StreamResult {
-                    path: file_uri,
-                    audio_url: None,
-                    subtitles,
-                });
-            }
-            return Err("no JSON in download response and no cached MP4 found".to_string());
-        }
-    };
-
-    // 如果有 JSON，解析 subtitle 信息
-    let mut subtitles: Vec<SubtitleTrack> = Vec::new();
-    if let Some(subs_arr) = info.get("subtitles").and_then(|v| v.as_array()) {
-        for sub in subs_arr {
-            let language = sub.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let name = sub.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let sub_path = sub.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            // 轉換為 Windows 本地路徑
-            let sub_path = sub_path.strip_prefix("file:///").unwrap_or(&sub_path).to_string().replace('/', "\\");
-            if !sub_path.is_empty() {
-                dlog!("[DEBUG try_download] Found subtitle: {} - {}", language, sub_path);
-                subtitles.push(SubtitleTrack { language, name: name.clone(), path: sub_path });
-            }
-        }
-    }
-    dlog!("[DEBUG try_download] subtitle tracks: {}", subtitles.len());
-
-    // 從 JSON 中取得下載後的 MP4 路徑
-    let file_uri = info.get("path")
-        .and_then(|v| v.as_str())
-        .map(|p| format!("file:///{}", p.replace('\\', "/")))
-        .unwrap_or_else(|| format!("file:///{}", video_id));
-
-    Ok(StreamResult {
-        path: file_uri,
-        audio_url: None,
-        subtitles,
-    })
-}
 
 /// 启动外部播放器
 #[command]
@@ -723,6 +624,24 @@ fn detect_players() -> DetectPlayersOutput {
     DetectPlayersOutput { vlc, mpv }
 }
 
+/// 以系統預設瀏覽器開啟 URL（設定頁「到 MPV 官網」等導引用）
+#[command]
+fn open_url(url: String) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", &url])
+            .spawn()
+            .map(|_| true)
+            .map_err(|e| format!("無法開啟瀏覽器: {}", e))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = &url;
+        Ok(false)
+    }
+}
+
 /// 检查 Python 执行环境
 #[command]
 fn check_python_environment() -> Result<serde_json::Value, String> {
@@ -801,6 +720,20 @@ fn get_channel_videos(channel_url: String) -> Result<SearchVideosOutput, String>
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_libmpv::init())
+        // 關閉安全網：libmpv plugin 在視窗關閉時會 prevent_close 並背景 destroy mpv 實例；
+        // 若內建播放器播放失敗/卡住導致 destroy 阻塞，視窗將永遠關不了。
+        // 這裡另起一個守護線程：正常關閉時程序先結束、線程隨之消失；
+        // 若 N 秒後程序仍活着（即 destroy 卡住），強制結束整個 APP。
+        .on_window_event(|_window, event| {
+            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
+                const FORCE_QUIT_AFTER_SECS: u64 = 8;
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(FORCE_QUIT_AFTER_SECS));
+                    eprintln!("[NoadYT] 視窗關閉後程序仍未結束，強制退出（libmpv destroy 卡住的安全網）");
+                    std::process::exit(0);
+                });
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             search_videos,
             search_channels,
@@ -808,6 +741,7 @@ fn main() {
             play_with_external_player,
             play_video_external,
             detect_players,
+            open_url,
             clear_cache,
             check_python_environment,
             write_log,

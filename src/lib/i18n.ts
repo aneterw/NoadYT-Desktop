@@ -216,6 +216,34 @@ export const translations: Translations = {
     'ja': '外部プレーヤーで開く',
     'es': 'Abrir en reproductor externo',
   },
+  internalFallbackTitle: {
+    'zh-Hant': '已切換到外部播放器',
+    'zh-Hans': '已切换到外部播放器',
+    'en': 'Switched to External Player',
+    'ja': '外部プレーヤーに切り替えました',
+    'es': 'Cambiado al reproductor externo',
+  },
+  internalFallbackStarted: {
+    'zh-Hant': '內建播放器未能顯示畫面，已自動改用外部播放器視窗播放',
+    'zh-Hans': '内置播放器未能显示画面，已自动改用外部播放器窗口播放',
+    'en': 'The internal player could not render video, so playback switched to an external player window',
+    'ja': '内部プレーヤーで映像が表示できなかったため、外部プレーヤーウィンドウで再生しました',
+    'es': 'El reproductor interno no pudo mostrar el video; la reproducción cambió a una ventana externa',
+  },
+  internalFallbackSwitching: {
+    'zh-Hant': '內建播放器未能顯示畫面，正在自動切換到外部播放器播放...',
+    'zh-Hans': '内置播放器未能显示画面，正在自动切换到外部播放器播放...',
+    'en': 'The internal player could not render video, switching to an external player...',
+    'ja': '内部プレーヤーで映像が表示できなかったため、外部プレーヤーに切り替え中...',
+    'es': 'El reproductor interno no pudo mostrar el video; cambiando a un reproductor externo...',
+  },
+  internalFallbackDesc: {
+    'zh-Hant': '改用外部播放器視窗播放（內建顯示失敗時自動觸發）',
+    'zh-Hans': '改用外部播放器窗口播放（内建显示失败时自动触发）',
+    'en': 'Play in an external player window (auto-triggers when internal display fails)',
+    'ja': '外部プレーヤーウィンドウで再生（内部表示が失敗した場合に自動発動）',
+    'es': 'Reproducir en una ventana de reproductor externo (se activa automáticamente si falla la pantalla interna)',
+  },
 
   // Settings
   settings: {
@@ -441,6 +469,20 @@ export const translations: Translations = {
     'ja': '未検出、先にインストールしてください',
     'es': 'No encontrado, instálelo primero',
   },
+  mpvRequiredHint: {
+    'zh-Hant': '直播影片必須使用 MPV 播放，請至少安裝 MPV',
+    'zh-Hans': '直播影片必须使用 MPV 播放，请至少安装 MPV',
+    'en': 'Live streams require MPV to play. Please install MPV at a minimum',
+    'ja': 'ライブ配信は MPV での再生が必要です。最低限 MPV をインストールしてください',
+    'es': 'Las transmisiones en vivo requieren MPV. Instale MPV como mínimo',
+  },
+  goToMpvSite: {
+    'zh-Hant': '到 MPV 官網下載',
+    'zh-Hans': '到 MPV 官网下载',
+    'en': 'Download from MPV official site',
+    'ja': 'MPV 公式サイトからダウンロード',
+    'es': 'Descargar del sitio oficial de MPV',
+  },
 
   // Resolution labels
   resAuto: {
@@ -486,6 +528,13 @@ export const translations: Translations = {
     'en': 'Auto Detect',
     'ja': '自動検出',
     'es': 'Detección automática',
+  },
+  subNone: {
+    'zh-Hant': '不要字幕',
+    'zh-Hans': '不要字幕',
+    'en': 'No Subtitles',
+    'ja': '字幕なし',
+    'es': 'Sin subtítulos',
   },
   subZhHant: {
     'zh-Hant': '繁體中文',

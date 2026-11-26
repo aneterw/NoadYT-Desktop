@@ -10,6 +10,7 @@ interface SearchTabProps {
   language: string
   mediaType: MediaType
   query: string
+  lastQuery: string
   onQueryChange: (q: string) => void
   onSearch: (q: string) => void
   searching: boolean
@@ -28,6 +29,7 @@ function SearchTab({
   language,
   mediaType,
   query,
+  lastQuery,
   onQueryChange,
   onSearch,
   searching,
@@ -44,6 +46,11 @@ function SearchTab({
   const [showHistory, setShowHistory] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
 
+  // 搜尋開始（searching）或結果出現後，收起來下拉歷史，避免遮蔽畫面
+  useEffect(() => {
+    if (searching || showResults) setShowHistory(false)
+  }, [searching, showResults])
+
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
@@ -59,7 +66,7 @@ function SearchTab({
     : t('searchChannelPlaceholder', language as any)
 
   // 搜尋完成後沒有結果（非搜尋中）
-  const showNoResults = !searching && !error && query.trim() !== '' && results.length === 0
+  const showNoResults = !searching && !error && results.length === 0
 
   return (
     <div className="space-y-4">
@@ -144,7 +151,7 @@ function SearchTab({
         </div>
       )}
 
-      {showNoResults && (
+      {showNoResults && lastQuery && (
         <div className="h-64 flex flex-col items-center justify-center text-center">
           <svg className="w-16 h-16 text-[#404045] mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -171,7 +178,7 @@ function SearchTab({
         </>
       )}
 
-      {!searching && !error && query.trim() === '' && (
+      {!searching && !error && !lastQuery && (
         <div className="h-64 flex flex-col items-center justify-center text-center">
           <svg className="w-16 h-16 text-[#404045] mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -193,6 +200,7 @@ export default function Home() {
     searchHistory,
     searchState,
     setSearchQuery,
+    setSearchLastQuery,
     setSearchResults,
     setSearchElapsed,
     setSearchResultMediaType,
@@ -201,7 +209,7 @@ export default function Home() {
   } = useApp()
 
   const { language, mediaType, searchLimit, channelLimit } = settings
-  const { query, results, elapsedMs, resultMediaType } = searchState
+  const { query, lastQuery, results, elapsedMs, resultMediaType } = searchState
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState('')
 
@@ -211,7 +219,7 @@ export default function Home() {
   const elapsedLabel = elapsedMs != null ? `${(elapsedMs / 1000).toFixed(1)}` : null
 
   const resultsLabel = showResults
-    ? `${query.trim() ? `「${query}」 · ` : ''}${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${results.length} 個影片` : `找到 ${results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${results.length} 個頻道` : `找到 ${results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
+    ? `${lastQuery ? `「${lastQuery}」 · ` : ''}${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${results.length} 個影片` : `找到 ${results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${results.length} 個頻道` : `找到 ${results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
     : ''
 
   const runSearch = useCallback(async (kw: string) => {
@@ -220,7 +228,9 @@ export default function Home() {
     setSearching(true)
     setError('')
     addToSearchHistory(trimmed)
-    setSearchQuery(trimmed)
+    // 搜尋一開始就清空搜尋框（下拉歷史同步收起來），關鍵字記錄在 lastQuery 供狀態列顯示
+    setSearchQuery('')
+    setSearchLastQuery(trimmed)
     setSearchResults([])
     setSearchElapsed(null)
     setSearchResultMediaType(null)
@@ -240,7 +250,7 @@ export default function Home() {
     } finally {
       setSearching(false)
     }
-  }, [mediaType, searchLimit, channelLimit, addToSearchHistory, setSearchQuery, setSearchResults, setSearchElapsed, setSearchResultMediaType])
+  }, [mediaType, searchLimit, channelLimit, addToSearchHistory, setSearchQuery, setSearchLastQuery, setSearchResults, setSearchElapsed, setSearchResultMediaType])
 
   return (
     <div className="min-h-screen bg-[#09090b] text-[#e4e4e7] flex flex-col">
@@ -285,6 +295,7 @@ export default function Home() {
           language={language}
           mediaType={mediaType}
           query={query}
+          lastQuery={lastQuery}
           onQueryChange={setSearchQuery}
           onSearch={runSearch}
           searching={searching}

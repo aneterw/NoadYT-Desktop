@@ -20,8 +20,10 @@ const SETTINGS_KEY = 'noadyt-settings'
 const MAX_HISTORY = 20
 
 interface SearchState {
-  /** 目前顯示的關鍵字（搜索框內容） */
+  /** 目前顯示在搜尋框的內容（搜尋開始後即清空，讓下拉歷史收起來） */
   query: string
+  /** 這次搜尋實際使用的關鍵字（供狀態列顯示，搜尋後保留） */
+  lastQuery: string
   /** 搜尋結果（影片或頻道） */
   results: (Video | Channel)[]
   /** 搜尋耗時（毫秒），null = 尚未搜尋 */
@@ -57,6 +59,7 @@ function loadSearchState(): SearchState {
       const parsed = JSON.parse(raw) as Partial<SearchState>
       return {
         query: typeof parsed.query === 'string' ? parsed.query : '',
+        lastQuery: typeof parsed.lastQuery === 'string' ? parsed.lastQuery : '',
         results: Array.isArray(parsed.results) ? parsed.results : [],
         elapsedMs: typeof parsed.elapsedMs === 'number' ? parsed.elapsedMs : null,
         resultMediaType: parsed.resultMediaType === 'videos' || parsed.resultMediaType === 'channels' ? parsed.resultMediaType : null,
@@ -65,7 +68,7 @@ function loadSearchState(): SearchState {
   } catch {
     // ignore
   }
-  return { query: '', results: [], elapsedMs: null, resultMediaType: null }
+  return { query: '', lastQuery: '', results: [], elapsedMs: null, resultMediaType: null }
 }
 
 function saveSearchState(state: SearchState): void {
@@ -118,6 +121,7 @@ interface AppContextValue {
 
   // 搜尋狀態（提升到全域，頁面切換不丢失）
   setSearchQuery: (query: string) => void
+  setSearchLastQuery: (query: string) => void
   setSearchResults: (results: (Video | Channel)[]) => void
   setSearchElapsed: (ms: number | null) => void
   setSearchResultMediaType: (type: MediaType | null) => void
@@ -166,6 +170,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const setSearchQuery = useCallback((query: string) => {
     setSearchState((prev) => ({ ...prev, query }))
+  }, [])
+
+  const setSearchLastQuery = useCallback((query: string) => {
+    setSearchState((prev) => ({ ...prev, lastQuery: query }))
   }, [])
 
   const setSearchResults = useCallback((results: (Video | Channel)[]) => {
@@ -228,6 +236,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setView,
       setIsSettingsOpen,
       setSearchQuery,
+      setSearchLastQuery,
       setSearchResults,
       setSearchElapsed,
       setSearchResultMediaType,
@@ -254,6 +263,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setView,
       setIsSettingsOpen,
       setSearchQuery,
+      setSearchLastQuery,
       setSearchResults,
       setSearchElapsed,
       setSearchResultMediaType,
@@ -294,6 +304,7 @@ export const RESOLUTION_OPTIONS: { value: MaxResolution; labelKey: string }[] = 
 
 export const SUBTITLE_LANGUAGE_OPTIONS: { value: SubtitleLanguage; labelKey: string }[] = [
   { value: 'auto', labelKey: 'subAuto' },
+  { value: 'none', labelKey: 'subNone' },
   { value: 'zh-Hant', labelKey: 'subZhHant' },
   { value: 'zh-Hans', labelKey: 'subZhHans' },
   { value: 'en', labelKey: 'subEn' },
