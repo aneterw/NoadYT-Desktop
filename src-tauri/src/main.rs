@@ -526,6 +526,7 @@ fn read_binary_file(path: String) -> Result<Vec<u8>, String> {
 }
 
 /// 清除下載和字幕快取目錄
+/// 遇到被其他程序佔用的檔案（os error 32）時跳過，不報錯
 #[command]
 fn clear_cache() -> Result<bool, String> {
     let temp_dir = env::temp_dir();
@@ -533,16 +534,30 @@ fn clear_cache() -> Result<bool, String> {
         temp_dir.join("NoadYT-Desktop").join("downloads"),
         temp_dir.join("NoadYT-Desktop").join("subtitles"),
     ];
+    let mut skipped = 0usize;
     for dir in &cache_dirs {
         if dir.exists() {
             for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
                 let entry = entry.map_err(|e| e.to_string())?;
                 let path = entry.path();
                 if path.is_file() {
-                    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                    match std::fs::remove_file(&path) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            // 檔案被佔用時跳過（Windows sharing violation = error 32）
+                            if e.raw_os_error() == Some(32) {
+                                skipped += 1;
+                            } else {
+                                return Err(format!("無法刪除 {}: {}", path.display(), e));
+                            }
+                        }
+                    }
                 }
             }
         }
+    }
+    if skipped > 0 {
+        dlog!("[DEBUG clear_cache] 有 {} 個檔案被佔用已跳過", skipped);
     }
     Ok(true)
 }

@@ -9,172 +9,98 @@ import { useApp } from '@/contexts/AppContext'
 interface SearchTabProps {
   language: string
   mediaType: MediaType
+  query: string
+  onQueryChange: (q: string) => void
+  onSearch: (q: string) => void
+  searching: boolean
+  error: string
+  results: (Video | Channel)[]
+  showResults: boolean
+  resultsLabel: string
   searchHistory: string[]
-  searchStartTime: number | null
-  onVideoSelect: (video: Video) => void
-  onChannelSelect: (channel: Channel) => void
-  addToSearchHistory: (keyword: string) => void
-  removeFromSearchHistory: (keyword: string) => void
-  setSearchResults: (results: Video[]) => void
-  setSearchStartTime: (time: number | null) => void
-  clearQuery?: () => void  // 从播放器返回时清除查询
+  onHistoryClick: (kw: string) => void
+  onRemoveHistory: (kw: string) => void
+  onOpenVideo: (video: Video) => void
+  onOpenChannel: (channel: Channel) => void
 }
 
 function SearchTab({
   language,
   mediaType,
+  query,
+  onQueryChange,
+  onSearch,
+  searching,
+  error,
+  results,
+  showResults,
+  resultsLabel,
   searchHistory,
-
-  searchStartTime,
-  onVideoSelect,
-  onChannelSelect,
-  addToSearchHistory,
-  removeFromSearchHistory,
-  setSearchResults,
-  setSearchStartTime,
-  clearQuery,
+  onHistoryClick,
+  onRemoveHistory,
+  onOpenVideo,
+  onOpenChannel,
 }: SearchTabProps) {
-  const [query, setQuery] = useState('')
-  const [localResults, setLocalResults] = useState<(Video | Channel)[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
   const [showHistory, setShowHistory] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
-  const searchStartRef = useRef<number | null>(null)
 
-  // 清除搜索框内容
   useEffect(() => {
-    if (clearQuery) clearQuery()
-  }, [])
-
-  // Click outside to close history dropdown
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    const handler = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setShowHistory(false)
       }
     }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  const runSearch = useCallback(async (kw: string) => {
-    const trimmed = kw.trim()
-    if (!trimmed) return
-    addToSearchHistory(trimmed)
-    searchStartRef.current = Date.now()
-    setSearchStartTime(searchStartRef.current)
-    setLoading(true)
-    setError('')
-    setLocalResults([])
-    setShowHistory(false)
-    try {
-      let results: (Video | Channel)[]
-      if (mediaType === 'videos') {
-        const videos = await searchVideos(trimmed)
-        results = videos
-        setSearchResults(videos)
-      } else {
-        const channels = await searchChannels(trimmed)
-        results = channels
-      }
-      setLocalResults(results)
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err)
-      setError(message)
-    } finally {
-      setLoading(false)
-      if (searchStartRef.current) {
-        const elapsed = ((Date.now() - searchStartRef.current) / 1000).toFixed(2)
-        console.log(`[Search] "${trimmed}" took ${elapsed}s`)
-      }
-    }
-  }, [mediaType, addToSearchHistory, setSearchResults, setSearchStartTime])
+  const placeholder = mediaType === 'videos'
+    ? t('searchPlaceholder', language as any)
+    : t('searchChannelPlaceholder', language as any)
 
-  const handleSearch = useCallback(() => {
-    runSearch(query)
-  }, [query, runSearch])
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      handleSearch()
-    }
-  }, [handleSearch])
-
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value
-    setQuery(val)
-    setShowHistory(searchHistory.length > 0 && val.length >= 0)
-  }, [searchHistory])
-
-  const handleInputFocus = useCallback(() => {
-    setShowHistory(searchHistory.length > 0)
-  }, [searchHistory])
-
-  const handleHistoryClick = useCallback((kw: string) => {
-    setQuery(kw)
-    setShowHistory(false)
-    runSearch(kw)
-  }, [runSearch])
-
-  const handleClearAll = useCallback(() => {
-    searchHistory.forEach((item) => removeFromSearchHistory(item))
-  }, [searchHistory, removeFromSearchHistory])
-
-  const formatElapsed = (startTime: number | null): string => {
-    if (!startTime) return ''
-    const elapsedMs = Date.now() - startTime
-    const seconds = (elapsedMs / 1000).toFixed(1)
-    return `${seconds}秒`
-  }
+  // 搜尋完成後沒有結果（非搜尋中）
+  const showNoResults = !searching && !error && query.trim() !== '' && results.length === 0
 
   return (
     <div className="space-y-4">
       <div className="relative" ref={containerRef}>
         <div className="flex gap-2">
-          <div className="relative flex-1">
-            <input
-              type="text"
-              value={query}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              onFocus={handleInputFocus}
-              onBlur={() => setTimeout(() => setShowHistory(false), 200)}
-              className="w-full px-4 py-2.5 rounded-lg bg-[#18181b] border border-[#27272a] text-white placeholder-[#71717a] focus:outline-none focus:ring-2 focus:ring-[#a855f7] transition-all pr-16"
-              placeholder={t('searchPlaceholder', language as any)}
-            />
-            {searchHistory.length > 0 && query === '' && (
-              <button
-                onClick={handleClearAll}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#71717a] hover:text-white transition-colors"
-                title="清除搜尋歷史"
-              >
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                </svg>
-              </button>
-            )}
-          </div>
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => onQueryChange(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onSearch(query)
+            }}
+            onFocus={() => setShowHistory(searchHistory.length > 0)}
+            className="flex-1 px-4 py-2.5 rounded-lg bg-[#18181b] border border-[#27272a] text-white placeholder-[#71717a] focus:outline-none focus:ring-2 focus:ring-[#a855f7] transition-all"
+            placeholder={placeholder}
+          />
           <button
-            onClick={handleSearch}
-            disabled={loading}
+            onClick={() => onSearch(query)}
+            disabled={searching}
             className="px-6 py-2.5 rounded-lg bg-[#a855f7] hover:bg-[#9333ea] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium transition-colors whitespace-nowrap"
           >
-            {loading ? t('search', language as any) + '...' : t('search', language as any)}
+            {searching ? `${t('search', language as any)}...` : t('search', language as any)}
           </button>
         </div>
 
-        {/* 搜尋歷史下拉清單 */}
-        {showHistory && searchHistory.length > 0 && query === '' && (
-          <div className="absolute z-50 top-full left-0 right-0 mt-1 bg-[#18181b] border border-[#27272a] rounded-lg shadow-xl overflow-hidden">
+        {showHistory && searchHistory.length > 0 && (
+          <div className="absolute z-40 top-full left-0 right-0 mt-1 bg-[#18181b] border border-[#27272a] rounded-lg shadow-xl overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[#27272a]">
-              <span className="text-xs text-[#a1a1aa]">{language === 'zh-Hant' ? '搜尋歷史' : language === 'zh-Hans' ? '搜索历史' : language === 'ja' ? '検索履歴' : language === 'es' ? 'Historial de búsqueda' : 'Search History'}</span>
+              <span className="text-xs text-[#a1a1aa]">{t('searchHistory', language as any)}</span>
+              <button
+                onClick={() => searchHistory.forEach(onRemoveHistory)}
+                className="text-xs text-[#71717a] hover:text-[#a855f7] transition-colors"
+              >
+                {t('clearHistory', language as any)}
+              </button>
             </div>
             <ul className="max-h-64 overflow-y-auto">
               {searchHistory.map((item, idx) => (
-                <li key={idx} className="flex items-center justify-between px-3 py-2 hover:bg-[#27272a] cursor-pointer transition-colors">
+                <li key={idx} className="flex items-center justify-between px-3 py-2 hover:bg-[#27272a] transition-colors">
                   <button
-                    onClick={() => handleHistoryClick(item)}
+                    onClick={() => onHistoryClick(item)}
                     className="flex-1 text-left text-sm text-[#e4e4e7] truncate"
                   >
                     <svg className="inline-block w-3.5 h-3.5 mr-2 text-[#71717a]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -185,11 +111,10 @@ function SearchTab({
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      removeFromSearchHistory(item)
+                      onRemoveHistory(item)
                     }}
                     className="ml-2 p-1 rounded hover:bg-[#3f3f46] text-[#71717a] hover:text-red-400 transition-colors"
-                    title={language === 'zh-Hant' ? '刪除' : language === 'zh-Hans' ? '删除' : language === 'ja' ? '削除' : language === 'es' ? 'Eliminar' : 'Delete'}
-                    aria-label="Remove from history"
+                    title={t('removeHistory', language as any)}
                   >
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -198,16 +123,6 @@ function SearchTab({
                 </li>
               ))}
             </ul>
-            {searchHistory.length > 0 && (
-              <div className="border-t border-[#27272a] px-3 py-2">
-                <button
-                  onClick={handleClearAll}
-                  className="text-xs text-[#71717a] hover:text-[#a855f7] transition-colors w-full text-center"
-                >
-                  {language === 'zh-Hant' ? '清除所有歷史記錄' : language === 'zh-Hans' ? '清除所有历史记录' : language === 'ja' ? 'すべての履歴を消去' : language === 'es' ? 'Borrar todo el historial' : 'Clear All History'}
-                </button>
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -218,81 +133,117 @@ function SearchTab({
         </div>
       )}
 
-      {loading && localResults.length === 0 && !error && (
+      {searching && (
         <div className="h-64 flex items-center justify-center">
           <div className="flex flex-col items-center gap-2 animate-pulse">
             <div className="w-8 h-8 rounded-full border-4 border-[#a855f7] border-t-transparent rounded-full spin" />
-            <span className="text-[#a1a1aa] text-sm">{t('search', language as any)}中...</span>
+            <span className="text-[#a1a1aa] text-sm">
+              {language === 'zh-Hant' ? '搜尋中...' : language === 'zh-Hans' ? '搜索中...' : 'Searching...'}
+            </span>
           </div>
         </div>
       )}
 
-      {!loading && localResults.length === 0 && !error && query.trim() === '' && (
+      {showNoResults && (
         <div className="h-64 flex flex-col items-center justify-center text-center">
           <svg className="w-16 h-16 text-[#404045] mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
           </svg>
-          <p className="text-[#a1a1aa]">{mediaType === 'videos' ? '輸入關鍵字開始搜尋影片' : '輸入關鍵字開始搜尋頻道'}</p>
+          <p className="text-[#a1a1aa]">{t('noResults', language as any)}</p>
         </div>
       )}
 
-      {!loading && localResults.length > 0 && (
+      {showResults && (
         <>
-          <div className="flex items-center justify-between">
-            <h2 className="font-bold text-[#e4e4e7]">
-              {t('resultsFound', language as any, { count: localResults.length })}
-              {searchStartTime && (
-                <span className="ml-2 text-sm font-normal text-[#a1a1aa]">
-                  · {formatElapsed(searchStartTime)}
-                </span>
-              )}
-            </h2>
+          {/* 搜索状态列：关键字 + 数量 + 耗时 */}
+          <div>
+            <h2 className="font-bold text-[#e4e4e7]">{resultsLabel}</h2>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-            {localResults.map((item) => {
-              if (mediaType === 'videos') {
-                const v = item as Video
-                return (
-                  <VideoCard
-                    key={v.id}
-                    video={v}
-                    language={language}
-                    onPlay={onVideoSelect}
-                    onOpenChannel={() => {}}
-                  />
-                )
-              }
-              const c = item as Channel
-              return (
-                <ChannelCard
-                  key={c.channelId}
-                  channel={c}
-                  language={language}
-                  onSelect={onChannelSelect}
-                />
-              )
-            })}
+            {mediaType === 'videos'
+              ? (results as Video[]).map((v) => (
+                  <VideoCard key={v.id} video={v} language={language} onPlay={onOpenVideo} />
+                ))
+              : (results as Channel[]).map((c) => (
+                  <ChannelCard key={c.channelId} channel={c} language={language} onSelect={onOpenChannel} />
+                ))}
           </div>
         </>
+      )}
+
+      {!searching && !error && query.trim() === '' && (
+        <div className="h-64 flex flex-col items-center justify-center text-center">
+          <svg className="w-16 h-16 text-[#404045] mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <p className="text-[#a1a1aa]">
+            {mediaType === 'videos' ? t('hintSearchVideos', language as any) : t('hintSearchChannels', language as any)}
+          </p>
+        </div>
       )}
     </div>
   )
 }
 
 export default function Home() {
-  const { settings, setMediaType, setView, searchHistory, addToSearchHistory, removeFromSearchHistory,  setCurrentMediaType, setSearchResults, searchStartTime, setSearchStartTime } = useApp()
-  const { language, mediaType } = settings
+  const {
+    settings,
+    setMediaType,
+    setView,
+    searchHistory,
+    searchState,
+    setSearchQuery,
+    setSearchResults,
+    setSearchElapsed,
+    setSearchResultMediaType,
+    addToSearchHistory,
+    removeFromSearchHistory,
+  } = useApp()
 
-  const handleVideoSelect = useCallback((video: Video) => {
-    setView({ id: 'player', videoId: video.id })
-  }, [setView])
+  const { language, mediaType, searchLimit, channelLimit } = settings
+  const { query, results, elapsedMs, resultMediaType } = searchState
+  const [searching, setSearching] = useState(false)
+  const [error, setError] = useState('')
 
-  const handleChannelSelect = useCallback((channel: Channel) => {
-    setView({ id: 'channel', channel })
-  }, [setView])
+  // 只有当结果类型与当前媒体类型匹配时才显示列表
+  const showResults = resultMediaType === mediaType && results.length > 0
+
+  const elapsedLabel = elapsedMs != null ? `${(elapsedMs / 1000).toFixed(1)}` : null
+
+  const resultsLabel = showResults
+    ? `「${query}」 · ${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${results.length} 個影片` : `找到 ${results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${results.length} 個頻道` : `找到 ${results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
+    : ''
+
+  const runSearch = useCallback(async (kw: string) => {
+    const trimmed = kw.trim()
+    if (!trimmed) return
+    setSearching(true)
+    setError('')
+    addToSearchHistory(trimmed)
+    setSearchQuery(trimmed)
+    setSearchResults([])
+    setSearchElapsed(null)
+    setSearchResultMediaType(null)
+    const started = performance.now()
+    try {
+      const limit = mediaType === 'videos' ? searchLimit : channelLimit
+      const found = mediaType === 'videos'
+        ? await searchVideos(trimmed, limit)
+        : await searchChannels(trimmed, limit)
+      setSearchResults(found)
+      setSearchResultMediaType(mediaType)
+      setSearchElapsed(performance.now() - started)
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      setError(message)
+      setSearchElapsed(performance.now() - started)
+    } finally {
+      setSearching(false)
+    }
+  }, [mediaType, searchLimit, channelLimit, addToSearchHistory, setSearchQuery, setSearchResults, setSearchElapsed, setSearchResultMediaType])
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-[#e4e4e7]">
+    <div className="min-h-screen bg-[#09090b] text-[#e4e4e7] flex flex-col">
       <header className="border-b border-[#27272a] bg-[#09090b]/80 backdrop-blur sticky top-0 z-50">
         <div className="flex items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
@@ -305,11 +256,7 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <button
-              onClick={() => {
-                const newType = mediaType === 'videos' ? 'channels' : 'videos'
-                setMediaType(newType)
-                setCurrentMediaType(newType)
-              }}
+              onClick={() => setMediaType(mediaType === 'videos' ? 'channels' : 'videos')}
               className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                 mediaType === 'videos'
                   ? 'bg-[#a855f7] text-white'
@@ -333,18 +280,23 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      <main className="flex-1 w-full max-w-7xl mx-auto px-6 py-8">
         <SearchTab
           language={language}
           mediaType={mediaType}
+          query={query}
+          onQueryChange={setSearchQuery}
+          onSearch={runSearch}
+          searching={searching}
+          error={error}
+          results={results}
+          showResults={showResults}
+          resultsLabel={resultsLabel}
           searchHistory={searchHistory}
-          searchStartTime={searchStartTime}
-          onVideoSelect={handleVideoSelect}
-          onChannelSelect={handleChannelSelect}
-          addToSearchHistory={addToSearchHistory}
-          removeFromSearchHistory={removeFromSearchHistory}
-          setSearchResults={setSearchResults}
-          setSearchStartTime={setSearchStartTime}
+          onHistoryClick={runSearch}
+          onRemoveHistory={removeFromSearchHistory}
+          onOpenVideo={(video) => setView({ id: 'player', videoId: video.id })}
+          onOpenChannel={(channel) => setView({ id: 'channel', channel })}
         />
       </main>
     </div>

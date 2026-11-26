@@ -13,6 +13,7 @@
         {"command": "get_channel_videos"},
         {"command": "get_stream_url"},
         {"command": "play_with_external_player"},
+        {"command": "play_video_external"},
         {"command": "check_python_environment"},
         {"command": "clear_cache"},
         {"command": "write_log"},

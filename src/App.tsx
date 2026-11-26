@@ -6,38 +6,33 @@ import VideoPlayer from '@/pages/VideoPlayer'
 import SettingsPage from '@/pages/SettingsPage'
 
 function Router() {
-  const { view, setView, setSearchStartTime } = useApp()
-  const { language } = useApp().settings
+  const { view, setView, setSearchQuery, setSearchElapsed, settings } = useApp()
 
   const handleBack = useCallback(() => {
     if (!view) return
     switch (view.id) {
       case 'channel':
-        // 从频道页返回：清除搜索状态，回到首页初始状态
-        setSearchStartTime(null)
+      case 'player':
+        // 返回首頁：清除搜尋框關鍵字，但保留影片列表（問題 1、5）
+        setSearchQuery('')
+        setSearchElapsed(null)
         setView({ id: 'home' })
         break
-      case 'player':
-        // 从播放器返回：保留搜索结果，只重置搜索时间和查询框
-        setSearchStartTime(null)
-        setView(view.channel ? { id: 'channel', channel: view.channel } : { id: 'home' })
-        break
       case 'settings':
+        // 從設定頁返回：保留搜尋列表與關鍵字（問題 2）
         setView({ id: 'home' })
         break
       default:
         break
     }
-  }, [view, setView, setSearchStartTime])
+  }, [view, setView, setSearchQuery, setSearchElapsed])
 
   switch (view?.id) {
-    case 'home':
-      return <Home />
     case 'channel':
       return (
         <ChannelVideos
           channel={view.channel!}
-          language={language}
+          language={settings.language}
           onVideoSelect={(video) => setView({ id: 'player', videoId: video.id })}
           onBack={handleBack}
         />
@@ -46,13 +41,13 @@ function Router() {
       return (
         <VideoPlayer
           videoId={view.videoId!}
-          language={language}
+          language={settings.language}
           onBack={handleBack}
         />
       )
     case 'settings':
       return (
-        <SettingsPage language={language} onBack={handleBack} />
+        <SettingsPage language={settings.language} onBack={handleBack} />
       )
     default:
       return <Home />

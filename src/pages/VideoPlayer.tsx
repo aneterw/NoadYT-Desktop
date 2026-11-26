@@ -22,8 +22,27 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [playing, setPlaying] = useState(false)
+  const [externalLaunched, setExternalLaunched] = useState(false)
 
   const loadStream = useCallback(async () => {
+    // 外部播放器模式：完全交給 Python run19.py 邏輯處理
+    // （自動偵測直播、強制 MPV、下載字幕、選取串流），不需 get_stream_url
+    if (playerType === 'external') {
+      setLoading(true)
+      setError('')
+      try {
+        await playVideoExternal(videoId, externalPlayer, subtitleLanguage, maxResolution)
+        setExternalLaunched(true)
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        setError(message)
+      } finally {
+        setLoading(false)
+      }
+      return
+    }
+
+    // 內建播放器模式：get_stream_url 分析串流後交給 libmpv
     setLoading(true)
     setError('')
     try {
@@ -42,33 +61,11 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
     } finally {
       setLoading(false)
     }
-  }, [videoId, maxResolution, subtitleLanguage, playerType])
+  }, [videoId, maxResolution, subtitleLanguage, playerType, externalPlayer])
 
   useEffect(() => {
     loadStream()
   }, [loadStream])
-
-  // 外部播放器模式：启动后保持当前视图（不立即返回）
-  useEffect(() => {
-    if (playerType === 'external' && streamResult && playing) {
-      const handleExternalPlay = async () => {
-        try {
-          await playVideoExternal(
-            videoId,
-            externalPlayer,
-            subtitleLanguage,
-            maxResolution,
-          )
-          setLoading(false)
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err)
-          setError(message)
-          setLoading(false)
-        }
-      }
-      handleExternalPlay()
-    }
-  }, [playerType, streamResult, playing, externalPlayer])
 
   // 内建播放器模式：初始化 libmpv 并加载流
   useEffect(() => {
@@ -137,10 +134,12 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
           <h2 className="text-xl font-bold text-[#e4e4e7] mb-2">{t('playerExternal', language as any)}</h2>
           <p className="text-[#a1a1aa] mb-6">
             {loading
-              ? '启动外部播放器中...'
+              ? '啟動外部播放器中...'
               : error
-                ? `播放失败：${error}`
-                : '外部播放器已启动，影片将在外部播放器中播放'}
+                ? `播放失敗：${error}`
+                : externalLaunched
+                  ? '外部播放器已啟動，影片將在外部播放器中播放'
+                  : '外部播放器尚未啟動'}
           </p>
           <button
             onClick={onBack}
