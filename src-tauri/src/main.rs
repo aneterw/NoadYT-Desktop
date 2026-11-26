@@ -698,6 +698,31 @@ fn play_video_external(input: PlayVideoInput) -> Result<String, String> {
     }
 }
 
+/// 播放器偵測結果（前端設定頁顯示）
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DetectPlayersOutput {
+    vlc: Option<String>,
+    mpv: Option<String>,
+}
+
+/// 偵測 VLC / MPV 主程式路徑（供設定頁顯示）
+#[command]
+fn detect_players() -> DetectPlayersOutput {
+    let mpv = find_player_exe("mpv", &[
+        r"C:\Program Files\mpv\mpv.exe",
+        r"C:\Program Files (x86)\mpv\mpv.exe",
+        "mpv.exe",
+        "mpv",
+    ]);
+    let vlc = find_player_exe("vlc", &[
+        r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+        r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+        "vlc.exe",
+    ]);
+    DetectPlayersOutput { vlc, mpv }
+}
+
 /// 检查 Python 执行环境
 #[command]
 fn check_python_environment() -> Result<serde_json::Value, String> {
@@ -782,6 +807,7 @@ fn main() {
             get_stream_url,
             play_with_external_player,
             play_video_external,
+            detect_players,
             clear_cache,
             check_python_environment,
             write_log,

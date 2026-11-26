@@ -28,6 +28,48 @@ export const translations: Translations = {
     'ja': 'キーワードを入力して YouTube を検索...',
     'es': 'Ingrese palabra clave para buscar en YouTube...',
   },
+  searchChannelPlaceholder: {
+    'zh-Hant': '輸入關鍵字搜尋頻道...',
+    'zh-Hans': '输入关键词搜索频道...',
+    'en': 'Enter keyword to search channels...',
+    'ja': 'キーワードでチャンネルを検索...',
+    'es': 'Ingrese palabra clave para buscar canales...',
+  },
+  searchHistory: {
+    'zh-Hant': '搜尋歷史',
+    'zh-Hans': '搜索历史',
+    'en': 'Search History',
+    'ja': '検索履歴',
+    'es': 'Historial de búsqueda',
+  },
+  clearHistory: {
+    'zh-Hant': '全部清除',
+    'zh-Hans': '全部清除',
+    'en': 'Clear All',
+    'ja': 'すべてクリア',
+    'es': 'Borrar todo',
+  },
+  removeHistory: {
+    'zh-Hant': '移除此紀錄',
+    'zh-Hans': '移除此记录',
+    'en': 'Remove this entry',
+    'ja': 'この履歴を削除',
+    'es': 'Quitar esta entrada',
+  },
+  hintSearchVideos: {
+    'zh-Hant': '輸入關鍵字開始搜尋影片',
+    'zh-Hans': '输入关键词开始搜索影片',
+    'en': 'Type a keyword to search for videos',
+    'ja': 'キーワードを入力して動画を検索',
+    'es': 'Escribe una palabra clave para buscar videos',
+  },
+  hintSearchChannels: {
+    'zh-Hant': '輸入關鍵字開始搜尋頻道',
+    'zh-Hans': '输入关键词开始搜索频道',
+    'en': 'Type a keyword to search for channels',
+    'ja': 'キーワードを入力してチャンネルを検索',
+    'es': 'Escribe una palabra clave para buscar canales',
+  },
   resultsFound: {
     'zh-Hant': '找到 {count} 個結果',
     'zh-Hans': '找到 {count} 個結果',
@@ -329,6 +371,75 @@ export const translations: Translations = {
     'en': 'Subtitle cache cleared',
     'ja': '字幕キャッシュがクリアされました',
     'es': 'Caché de subtítulos limpiada',
+  },
+
+  // 滑桿操作提示
+  sliderHint: {
+    'zh-Hant': '拖動滑塊，或點住後用 ↑/↓ 方向鍵微調',
+    'zh-Hans': '拖动滑块，或点住后用 ↑/↓ 方向键微调',
+    'en': 'Drag the slider, or focus it and use ↑/↓ arrow keys',
+    'ja': 'スライダーをドラッグ、またはフォーカス後 ↑/↓ キーで微調整',
+    'es': 'Arrastre el control o use las teclas ↑/↓',
+  },
+
+  // 儲存並離開
+  saveAndExit: {
+    'zh-Hant': '儲存並離開',
+    'zh-Hans': '保存并离开',
+    'en': 'Save & Exit',
+    'ja': '保存して閉じる',
+    'es': 'Guardar y salir',
+  },
+  saveAndExitTitle: {
+    'zh-Hant': '設定摘要',
+    'zh-Hans': '设置摘要',
+    'en': 'Settings Summary',
+    'ja': '設定サマリー',
+    'es': 'Resumen de ajustes',
+  },
+  saveAndExitDesc: {
+    'zh-Hant': '以下為目前設定現況，確認後將儲存並返回首頁',
+    'zh-Hans': '以下为目前设定现状，确认后将储存并返回主页',
+    'en': 'Review the current settings. They will be saved when you confirm.',
+    'ja': '現在の設定を確認してください。確定すると保存してホームへ戻ります。',
+    'es': 'Revise los ajustes actuales. Se guardarán al confirmar.',
+  },
+  confirm: {
+    'zh-Hant': '確定並返回',
+    'zh-Hans': '确定并返回',
+    'en': 'Confirm & Go Back',
+    'ja': '確定して戻る',
+    'es': 'Confirmar y volver',
+  },
+  cancel: {
+    'zh-Hant': '取消',
+    'zh-Hans': '取消',
+    'en': 'Cancel',
+    'ja': 'キャンセル',
+    'es': 'Cancelar',
+  },
+  savedToast: {
+    'zh-Hant': '設定已儲存並返回首頁',
+    'zh-Hans': '设置已保存并返回主页',
+    'en': 'Settings saved and returning to home',
+    'ja': '設定を保存しホームに戻ります',
+    'es': 'Ajustes guardados, volviendo al inicio',
+  },
+
+  // 播放器偵測
+  playerDetected: {
+    'zh-Hant': '偵測到',
+    'zh-Hans': '检测到',
+    'en': 'Detected',
+    'ja': '検出',
+    'es': 'Detectado',
+  },
+  playerNotFound: {
+    'zh-Hant': '未偵測到，請先安裝',
+    'zh-Hans': '未检测到，请先安装',
+    'en': 'Not found, please install it first',
+    'ja': '未検出、先にインストールしてください',
+    'es': 'No encontrado, instálelo primero',
   },
 
   // Resolution labels

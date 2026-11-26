@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import type {
   AppLanguage,
   MaxResolution,
@@ -6,6 +6,7 @@ import type {
   ExternalPlayer,
 } from '@/lib/types'
 import { t } from '@/lib/i18n'
+import { detectPlayers } from '@/lib/api'
 import {
   useApp,
   RESOLUTION_OPTIONS,
@@ -19,7 +20,74 @@ interface SettingsPageProps {
   onBack: () => void
 }
 
+const SEARCH_LIMIT_RANGE = { min: 20, max: 120, step: 5 }
+const CHANNEL_LIMIT_RANGE = { min: 30, max: 60, step: 5 }
+
+/** 範圍滑桿：滑塊拖動 + 左右按鈕 + 聚焦後方向鍵微調 */
+function RangeSlider({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  lang,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (v: number) => void
+  lang: 'zh-Hant' | 'zh-Hans' | 'en' | 'ja' | 'es'
+}) {
+  const clamp = (v: number) => Math.max(min, Math.min(max, v))
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-[#a1a1aa]">{label}</span>
+        <span className="text-lg font-bold text-[#a855f7] tabular-nums">{value}</span>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          aria-label="decrease"
+          onClick={() => onChange(clamp(value - step))}
+          disabled={value <= min}
+          className="w-7 h-7 rounded bg-[#27272a] border border-[#3f3f46] text-white text-sm flex items-center justify-center hover:bg-[#3f3f46] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          −
+        </button>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(parseInt(e.target.value, 10))}
+          aria-label={label}
+          className="flex-1 accent-[#a855f7] cursor-pointer h-2"
+        />
+        <button
+          type="button"
+          aria-label="increase"
+          onClick={() => onChange(clamp(value + step))}
+          disabled={value >= max}
+          className="w-7 h-7 rounded bg-[#27272a] border border-[#3f3f46] text-white text-sm flex items-center justify-center hover:bg-[#3f3f46] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          +
+        </button>
+      </div>
+      <p className="text-[11px] text-[#71717a]">
+        {t('sliderHint', lang)} · 範圍 {min} ~ {max}（每次 {step}）
+      </p>
+    </div>
+  )
+}
+
 export default function SettingsPage({ language, onBack }: SettingsPageProps) {
+  const langKey = language as 'zh-Hant' | 'zh-Hans' | 'en' | 'ja' | 'es'
   const {
     settings,
     setLanguage,
@@ -30,10 +98,14 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
     setExternalPlayer,
     setSearchLimit,
     setChannelLimit,
+    saveCurrentSettings,
     clearSubtitleCache,
   } = useApp()
 
   const [clearing, setClearing] = useState(false)
+  const [playerPaths, setPlayerPaths] = useState<{ vlc: string | null; mpv: string | null } | null>(null)
+  const [showSaveDialog, setShowSaveDialog] = useState(false)
+  const [savedToast, setSavedToast] = useState(false)
 
   const {
     language: currentLang,
@@ -46,22 +118,60 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
     channelLimit,
   } = settings
 
+  // 偵測外部播放器主程式路徑
+  useEffect(() => {
+    detectPlayers()
+      .then(setPlayerPaths)
+      .catch(() => setPlayerPaths({ vlc: null, mpv: null }))
+  }, [])
+
   const clearCache = useCallback(async () => {
-    if (!window.confirm(t('clearSubtitleCache', language as any))) return
+    if (!window.confirm(t('clearSubtitleCache', langKey))) return
     setClearing(true)
     try {
       await clearSubtitleCache()
-      // 成功：显示绿色确认状态 2 秒后恢复
       setTimeout(() => setClearing(false), 2000)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      alert(`清除失敗：${message}`)
+      alert(`${t('error', langKey)}：${message}`)
       setClearing(false)
     }
-  }, [clearSubtitleCache, language])
+  }, [clearSubtitleCache, langKey])
+
+  /** 儲存並離開：列出所有參數現況，確認後回主頁 */
+  const handleSaveAndExit = () => {
+    setShowSaveDialog(true)
+  }
+
+  const confirmSaveAndExit = () => {
+    saveCurrentSettings()
+    setShowSaveDialog(false)
+    setSavedToast(true)
+    setTimeout(() => {
+      setSavedToast(false)
+      onBack()
+    }, 800)
+  }
+
+  const resLabel = RESOLUTION_OPTIONS.find((o) => o.value === currentRes)?.labelKey ?? 'resAuto'
+  const subLabel = SUBTITLE_LANGUAGE_OPTIONS.find((o) => o.value === currentSubLang)?.labelKey ?? 'subAuto'
+  const playerLabel =
+    currentPlayerType === 'external'
+      ? `${t('playerExternal', langKey)}（${t(EXTERNAL_PLAYER_OPTIONS.find((o) => o.value === currentExtPlayer)?.labelKey ?? 'playerVLC', langKey)}）`
+      : t('playerInternal', langKey)
+
+  const summaryRows: { label: string; value: string }[] = [
+    { label: t('language', langKey), value: getLanguageLabel(currentLang) },
+    { label: t('mediaType', langKey), value: t(mediaType === 'videos' ? 'videos' : 'channels', langKey) },
+    { label: t('maxResolution', langKey), value: t(resLabel, langKey) },
+    { label: t('subtitleLanguage', langKey), value: t(subLabel, langKey) },
+    { label: t('playerType', langKey), value: playerLabel },
+    { label: t('searchLimit', langKey), value: String(searchLimit) },
+    { label: t('channelLimit', langKey), value: String(channelLimit) },
+  ]
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-[#e4e4e7] flex flex-col">
+    <div className="min-h-screen bg-[#09090b] text-[#e4e4e7] flex flex-col relative">
       <header className="border-b border-[#27272a] bg-[#09090b]/80 backdrop-blur px-6 py-3">
         <button
           onClick={onBack}
@@ -70,230 +180,153 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
-          <span className="text-sm font-medium">{t('back', language as any)}</span>
+          <span className="text-sm font-medium">{t('back', langKey)}</span>
         </button>
       </header>
 
       <main className="flex-1 overflow-y-auto p-6">
         <div className="max-w-2xl mx-auto space-y-8">
           <div>
-            <h1 className="text-2xl font-bold text-[#e4e4e7] mb-2">{t('settings', language as any)}</h1>
-            <p className="text-[#a1a1aa] text-sm">{t('settingsDesc', language as any)}</p>
+            <h1 className="text-2xl font-bold text-[#e4e4e7] mb-2">{t('settings', langKey)}</h1>
+            <p className="text-[#a1a1aa] text-sm">{t('settingsDesc', langKey)}</p>
           </div>
 
           {/* 介面語言 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('language', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('languageDesc', language as any)}</p>
-              </div>
-            </div>
+          <Section title={t('language', langKey)} desc={t('languageDesc', langKey)}>
             <div className="flex gap-2 flex-wrap">
               {INTERFACE_LANGUAGE_OPTIONS.map((opt: { value: AppLanguage; labelKey: string }) => (
-                <button
+                <LangPill
                   key={opt.value}
+                  active={currentLang === opt.value}
+                  label={getLanguageLabel(opt.value)}
                   onClick={() => setLanguage(opt.value)}
-                  className={`px-3 py-1.5 rounded text-sm font-medium transition-all ${
-                    currentLang === opt.value
-                      ? 'bg-[#a855f7] text-white'
-                      : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                  }`}
-                >
-                  {getLanguageLabel(opt.value)}
-                </button>
+                />
               ))}
             </div>
-          </section>
+          </Section>
 
           {/* 搜索類型 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('mediaType', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('mediaTypeDesc', language as any)}</p>
-              </div>
-            </div>
+          <Section title={t('mediaType', langKey)} desc={t('mediaTypeDesc', langKey)}>
             <div className="flex gap-2">
-              <button
-                onClick={() => setMediaType('videos')}
-                className={`flex-1 py-2 rounded text-sm font-medium transition-all ${
-                  mediaType === 'videos'
-                    ? 'bg-[#a855f7] text-white'
-                    : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                }`}
-              >
-                {t('videos', language as any)}
-              </button>
-              <button
-                onClick={() => setMediaType('channels')}
-                className={`flex-1 py-2 rounded text-sm font-medium transition-all ${
-                  mediaType === 'channels'
-                    ? 'bg-[#a855f7] text-white'
-                    : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                }`}
-              >
-                {t('channels', language as any)}
-              </button>
+              <Pill active={mediaType === 'videos'} label={t('videos', langKey)} onClick={() => setMediaType('videos')} />
+              <Pill active={mediaType === 'channels'} label={t('channels', langKey)} onClick={() => setMediaType('channels')} />
             </div>
-          </section>
+          </Section>
 
           {/* 解析度上限 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('maxResolution', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('maxResolutionDesc', language as any)}</p>
-              </div>
-            </div>
+          <Section title={t('maxResolution', langKey)} desc={t('maxResolutionDesc', langKey)}>
             <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-2">
               {RESOLUTION_OPTIONS.map((opt: { value: MaxResolution; labelKey: string }) => (
-                <button
+                <Pill
                   key={opt.value}
+                  active={currentRes === opt.value}
+                  label={t(opt.labelKey, langKey)}
                   onClick={() => setMaxResolution(opt.value)}
-                  className={`px-2 py-2 rounded text-sm font-medium transition-all ${
-                    currentRes === opt.value
-                      ? 'bg-[#a855f7] text-white'
-                      : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                  }`}
-                >
-                  {t(opt.labelKey, language as any)}
-                </button>
+                />
               ))}
             </div>
-          </section>
+          </Section>
 
           {/* 字幕語言 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('subtitleLanguage', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('subtitleLanguageDesc', language as any)}</p>
-              </div>
-            </div>
+          <Section title={t('subtitleLanguage', langKey)} desc={t('subtitleLanguageDesc', langKey)}>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
               {SUBTITLE_LANGUAGE_OPTIONS.map((opt: { value: SubtitleLanguage; labelKey: string }) => (
-                <button
+                <Pill
                   key={opt.value}
+                  active={currentSubLang === opt.value}
+                  label={t(opt.labelKey, langKey)}
                   onClick={() => setSubtitleLanguage(opt.value)}
-                  className={`px-2 py-2 rounded text-sm font-medium transition-all ${
-                    currentSubLang === opt.value
-                      ? 'bg-[#a855f7] text-white'
-                      : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                  }`}
-                >
-                  {t(opt.labelKey, language as any)}
-                </button>
+                />
               ))}
             </div>
-          </section>
+          </Section>
 
           {/* 播放器選擇 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('playerType', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('playerTypeDesc', language as any)}</p>
-              </div>
-            </div>
+          <Section title={t('playerType', langKey)} desc={t('playerTypeDesc', langKey)}>
             <div className="flex gap-2">
-              <button
+              <Pill
+                active={currentPlayerType === 'internal'}
+                label={t('playerInternal', langKey)}
                 onClick={() => setPlayerType('internal')}
-                className={`flex-1 py-2 rounded text-sm font-medium transition-all ${
-                  currentPlayerType === 'internal'
-                    ? 'bg-[#a855f7] text-white'
-                    : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                }`}
-              >
-                {t('playerInternal', language as any)}
-              </button>
-              <button
+              />
+              <Pill
+                active={currentPlayerType === 'external'}
+                label={t('playerExternal', langKey)}
                 onClick={() => setPlayerType('external')}
-                className={`flex-1 py-2 rounded text-sm font-medium transition-all ${
-                  currentPlayerType === 'external'
-                    ? 'bg-[#a855f7] text-white'
-                    : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                }`}
-              >
-                {t('playerExternal', language as any)}
-              </button>
+              />
             </div>
             {currentPlayerType === 'external' && (
-              <div className="mt-4 pl-2">
-                <div className="mb-2 text-[#a1a1aa] text-xs">{t('externalPlayerDesc', language as any)}</div>
+              <div className="mt-4 pl-2 space-y-3">
+                <div className="text-[#a1a1aa] text-xs">{t('externalPlayerDesc', langKey)}</div>
                 <div className="flex gap-2">
                   {EXTERNAL_PLAYER_OPTIONS.map((opt: { value: ExternalPlayer; labelKey: string }) => (
-                    <button
+                    <Pill
                       key={opt.value}
+                      active={currentExtPlayer === opt.value}
+                      label={t(opt.labelKey, langKey)}
                       onClick={() => setExternalPlayer(opt.value)}
-                      className={`px-3 py-1.5 rounded text-sm font-medium transition-all ${
-                        currentExtPlayer === opt.value
-                          ? 'bg-[#a855f7] text-white'
-                          : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
-                      }`}
-                    >
-                      {t(opt.labelKey, language as any)}
-                    </button>
+                    />
                   ))}
                 </div>
+                {/* 偵測到的主程式路徑 */}
+                {playerPaths && (
+                  <div className="space-y-1 text-xs">
+                    {(['vlc', 'mpv'] as const).map((name) => {
+                      const path = playerPaths[name]
+                      const active = currentExtPlayer === name
+                      return (
+                        <div
+                          key={name}
+                          className={`px-3 py-2 rounded border flex items-center gap-2 ${
+                            active ? 'border-[#a855f7]/50 bg-[#a855f7]/10' : 'border-[#27272a] bg-[#18181b]'
+                          }`}
+                        >
+                          <span className="font-semibold w-8 shrink-0">{name.toUpperCase()}</span>
+                          {path ? (
+                            <>
+                              <span className="text-[#4ade80]">{t('playerDetected', langKey)}:</span>
+                              <span className="text-[#a1a1aa] break-all" title={path}>{path}</span>
+                            </>
+                          ) : (
+                            <span className="text-[#f87171]">{t('playerNotFound', langKey)}</span>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             )}
-          </section>
+          </Section>
 
-          {/* 搜尋條目數 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('searchLimit', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('searchLimitDesc', language as any)}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="number"
-                min="20"
-                max="120"
-                value={searchLimit}
-                onChange={(e) => {
-                  const v = Math.max(20, Math.min(120, parseInt(e.target.value, 10) || 20))
-                  setSearchLimit(v)
-                }}
-                className="w-20 px-3 py-2 rounded bg-[#27272a] border border-[#3f3f46] text-white text-sm focus:outline-none focus:ring-2 focus:ring-[#a855f7]"
-              />
-            </div>
-          </section>
+          {/* 搜尋條目數（滑桿） */}
+          <Section title={t('searchLimit', langKey)} desc={t('searchLimitDesc', langKey)}>
+            <RangeSlider
+              label={t('searchLimit', langKey)}
+              value={searchLimit}
+              min={SEARCH_LIMIT_RANGE.min}
+              max={SEARCH_LIMIT_RANGE.max}
+              step={SEARCH_LIMIT_RANGE.step}
+              onChange={setSearchLimit}
+              lang={langKey}
+            />
+          </Section>
 
-          {/* 頻道搜尋條目數 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('channelLimit', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('channelLimitDesc', language as any)}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="number"
-                min="30"
-                max="60"
-                value={channelLimit}
-                onChange={(e) => {
-                  const v = Math.max(30, Math.min(60, parseInt(e.target.value, 10) || 30))
-                  setChannelLimit(v)
-                }}
-                className="w-20 px-3 py-2 rounded bg-[#27272a] border border-[#3f3f46] text-white text-sm focus:outline-none focus:ring-2 focus:ring-[#a855f7]"
-              />
-            </div>
-          </section>
+          {/* 頻道搜尋條目數（滑桿） */}
+          <Section title={t('channelLimit', langKey)} desc={t('channelLimitDesc', langKey)}>
+            <RangeSlider
+              label={t('channelLimit', langKey)}
+              value={channelLimit}
+              min={CHANNEL_LIMIT_RANGE.min}
+              max={CHANNEL_LIMIT_RANGE.max}
+              step={CHANNEL_LIMIT_RANGE.step}
+              onChange={setChannelLimit}
+              lang={langKey}
+            />
+          </Section>
 
           {/* 清除字幕快取 */}
- <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
-            <div className="flex items-center justify-between mb-3">
-              <div>
-                <h2 className="font-semibold text-[#e4e4e7]">{t('clearSubtitleCache', language as any)}</h2>
-                <p className="text-[#a1a1aa] text-xs">{t('clearSubtitleCacheDesc', language as any)}</p>
-              </div>
-            </div>
+          <Section title={t('clearSubtitleCache', langKey)} desc={t('clearSubtitleCacheDesc', langKey)}>
             <button
               onClick={clearCache}
               disabled={clearing}
@@ -303,12 +336,107 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
                   : 'bg-[#18181b] border border-[#27272a] text-[#a1a1aa] hover:text-white hover:border-[#a855f7]/50'
               }`}
             >
-              {clearing ? t('cacheCleared', language as any) : t('clearSubtitleCache', language as any)}
+              {clearing ? t('cacheCleared', langKey) : t('clearSubtitleCache', langKey)}
             </button>
-          </section>
+          </Section>
+
+          {/* 儲存並離開 */}
+          <div className="pt-4 border-t border-[#27272a]">
+            <button
+              onClick={handleSaveAndExit}
+              className="w-full py-3 rounded-lg bg-[#a855f7] hover:bg-[#9333ea] text-white font-semibold transition-colors"
+            >
+              {t('saveAndExit', langKey)}
+            </button>
+          </div>
         </div>
       </main>
+
+      {/* 儲存並離開對話框：列出所有參數現況 */}
+      {showSaveDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md bg-[#18181b] border border-[#3f3f46] rounded-xl shadow-2xl">
+            <div className="px-5 pt-5 pb-3">
+              <h3 className="text-lg font-bold text-[#e4e4e7]">{t('saveAndExitTitle', langKey)}</h3>
+              <p className="text-xs text-[#a1a1aa] mt-1">{t('saveAndExitDesc', langKey)}</p>
+            </div>
+            <div className="px-5 py-3 border-t border-[#27272a] space-y-2">
+              {summaryRows.map((row) => (
+                <div key={row.label} className="flex items-center justify-between gap-4 text-sm">
+                  <span className="text-[#a1a1aa] shrink-0">{row.label}</span>
+                  <span className="text-[#e4e4e7] font-medium text-right break-all">{row.value}</span>
+                </div>
+              ))}
+            </div>
+            <div className="px-5 py-4 border-t border-[#27272a] flex gap-3">
+              <button
+                onClick={() => setShowSaveDialog(false)}
+                className="flex-1 py-2.5 rounded-lg bg-[#27272a] border border-[#3f3f46] text-[#a1a1aa] hover:text-white text-sm font-medium transition-colors"
+              >
+                {t('cancel', langKey)}
+              </button>
+              <button
+                onClick={confirmSaveAndExit}
+                className="flex-1 py-2.5 rounded-lg bg-[#a855f7] hover:bg-[#9333ea] text-white text-sm font-semibold transition-colors"
+              >
+                {t('confirm', langKey)}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 儲存成功提示 */}
+      {savedToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-lg bg-[#166534] border border-green-500 text-white text-sm shadow-xl">
+          {t('savedToast', langKey)}
+        </div>
+      )}
     </div>
+  )
+}
+
+/* ---------- 小型 UI 元件 ---------- */
+
+function Section({ title, desc, children }: { title: string; desc: string; children: ReactNode }) {
+  return (
+    <section className="bg-[#18181b] rounded-xl border border-[#27272a] p-5">
+      <div className="mb-3">
+        <h2 className="font-semibold text-[#e4e4e7]">{title}</h2>
+        <p className="text-[#a1a1aa] text-xs">{desc}</p>
+      </div>
+      {children}
+    </section>
+  )
+}
+
+function Pill({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 px-3 py-2 rounded text-sm font-medium transition-all ${
+        active
+          ? 'bg-[#a855f7] text-white'
+          : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
+      }`}
+    >
+      {label}
+    </button>
+  )
+}
+
+function LangPill({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-1.5 rounded text-sm font-medium transition-all ${
+        active
+          ? 'bg-[#a855f7] text-white'
+          : 'bg-[#27272a] border border-[#27272a] text-[#a1a1aa] hover:bg-[#3f3f46]'
+      }`}
+    >
+      {label}
+    </button>
   )
 }
 
@@ -316,9 +444,9 @@ function getLanguageLabel(value: AppLanguage): string {
   const labels: Record<AppLanguage, string> = {
     'zh-Hant': '繁體中文',
     'zh-Hans': '簡體中文',
-    'en': 'English',
-    'ja': '日本語',
-    'es': 'Español',
+    en: 'English',
+    ja: '日本語',
+    es: 'Español',
   }
   return labels[value]
 }

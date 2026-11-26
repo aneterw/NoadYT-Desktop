@@ -6,16 +6,15 @@ import VideoPlayer from '@/pages/VideoPlayer'
 import SettingsPage from '@/pages/SettingsPage'
 
 function Router() {
-  const { view, setView, setSearchQuery, setSearchElapsed, settings } = useApp()
+  const { view, setView, setSearchQuery, settings } = useApp()
 
   const handleBack = useCallback(() => {
     if (!view) return
     switch (view.id) {
       case 'channel':
       case 'player':
-        // 返回首頁：清除搜尋框關鍵字，但保留影片列表（問題 1、5）
+        // 返回首頁：清除搜尋框關鍵字，保留影片列表與耗時（問題 1、5）
         setSearchQuery('')
-        setSearchElapsed(null)
         setView({ id: 'home' })
         break
       case 'settings':
@@ -25,7 +24,7 @@ function Router() {
       default:
         break
     }
-  }, [view, setView, setSearchQuery, setSearchElapsed])
+  }, [view, setView, setSearchQuery])
 
   switch (view?.id) {
     case 'channel':

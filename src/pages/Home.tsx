@@ -211,7 +211,7 @@ export default function Home() {
   const elapsedLabel = elapsedMs != null ? `${(elapsedMs / 1000).toFixed(1)}` : null
 
   const resultsLabel = showResults
-    ? `「${query}」 · ${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${results.length} 個影片` : `找到 ${results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${results.length} 個頻道` : `找到 ${results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
+    ? `${query.trim() ? `「${query}」 · ` : ''}${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${results.length} 個影片` : `找到 ${results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${results.length} 個頻道` : `找到 ${results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
     : ''
 
   const runSearch = useCallback(async (kw: string) => {

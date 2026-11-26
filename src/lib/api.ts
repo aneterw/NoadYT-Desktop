@@ -125,6 +125,11 @@ export async function playVideoExternal(
   })
 }
 
+/** 偵測外部播放器主程式路徑（供設定頁顯示） */
+export async function detectPlayers(): Promise<{ vlc: string | null; mpv: string | null }> {
+  return callSimpleCommand<{ vlc: string | null; mpv: string | null }>('detect_players', {})
+}
+
 /** 將語言代碼轉換為後台端預期格式（若需要） */
 export function normalizeSubtitleLang(lang: LanguageKey | 'ko' | 'de' | 'fr'): string {
   const map: Record<string, string> = {
