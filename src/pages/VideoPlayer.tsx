@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { init, destroy, command, setProperty, observeProperties, listenEvents } from 'tauri-plugin-libmpv-api'
+import { init, destroy, command, setProperty, getProperty, observeProperties, listenEvents } from 'tauri-plugin-libmpv-api'
 import { getStreamUrl, playVideoExternal } from '@/lib/api'
 import type { StreamResult } from '@/lib/types'
 import { t } from '@/lib/i18n'
@@ -11,7 +11,18 @@ interface VideoPlayerProps {
   onBack: () => void
 }
 
-const OBSERVED_PROPERTIES: readonly ['pause', 'flag'][] = [['pause', 'flag']]
+const OBSERVED_PROPERTIES = [
+  ['pause', 'flag'],
+  ['time-pos', 'double', 'none'],
+  ['duration', 'double', 'none'],
+] as const
+
+/** mm:ss 時長顯示 */
+function fmtTime(sec: number | null | undefined): string {
+  if (sec == null || !isFinite(sec)) return '0:00'
+  const s = Math.max(0, Math.floor(sec))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
 
 export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerProps) {
   const { settings } = useApp()
@@ -24,6 +35,12 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   const [playing, setPlaying] = useState(false)
   const [externalLaunched, setExternalLaunched] = useState(false)
   const [internalFailed, setInternalFailed] = useState(false)
+  // 內建播放器狀態與診斷
+  const [timePos, setTimePos] = useState(0)
+  const [duration, setDuration] = useState(0)
+  const [videoVo, setVideoVo] = useState('')
+  const [videoSeen, setVideoSeen] = useState(false)
+  const [diagLog, setDiagLog] = useState<string[]>([])
 
   /** 內建播放器手動/自動備援：改用外部播放器（run19.py 邏輯，已被證實可播） */
   const launchExternal = useCallback(async () => {
@@ -94,15 +111,15 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   useEffect(() => {
     if (playerType === 'internal' && streamResult && playing && !mpvInitialized.current) {
       // 注意：不能在這個條件分支裡呼叫 hooks（useRef 等），會崩潰成白屏。
-      // 用 effect 內的普通變數閉包保存 timer / unlisten。
+      // 用 effect 內的普通變數閉包保存 timer / unlisten / seen。
       let unlistenEvents: (() => void) | null = null
-      let videoSeen = false
+      let seenRef = false
       let fallbackTimer: number | null = null
 
       const startFallbackWatchdog = () => {
         if (fallbackTimer !== null) return
         fallbackTimer = window.setTimeout(() => {
-          if (!videoSeen) {
+          if (!seenRef) {
             // 內嵌顯示失敗（黑畫面）→ 自動切換外部播放器
             void launchExternal()
           }
@@ -131,20 +148,44 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
           await observeProperties(OBSERVED_PROPERTIES, ({ name, data }) => {
             if (name === 'pause') {
               setPlaying(data !== true)
+            } else if (name === 'time-pos') {
+              setTimePos(typeof data === 'number' ? data : 0)
+            } else if (name === 'duration') {
+              setDuration(typeof data === 'number' ? data : 0)
             }
           })
+
+          // 診斷：mpv 目前用的影像輸出裝置（video-vo，例如 wid / d3d11 / ...）
+          const readVideoVo = async () => {
+            try {
+              const v = await getProperty('video-vo', 'string')
+              if (typeof v === 'string' && v) setVideoVo(v)
+            } catch {
+              // 讀不到就算了
+            }
+          }
+          void readVideoVo()
+          setTimeout(() => { void readVideoVo() }, 3000)
+          setTimeout(() => { void readVideoVo() }, 8000)
 
           const audioUrl = streamResult.audioUrl ?? null
           const subs = streamResult.subtitles
 
-          // 事件監聽：audio/sub 掛載 + 出畫面偵測 + 播放失敗偵測
+          // 事件監聽：audio/sub 掛載 + 出畫面偵測 + 播放失敗偵測 + mpv log 收集
           const unlisten = await listenEvents((event) => {
             if (event.event === 'video-reconfig') {
               // 畫面真正出來了 → 取消備援看門狗
-              videoSeen = true
+              seenRef = true
+              setVideoSeen(true)
               if (fallbackTimer !== null) {
                 window.clearTimeout(fallbackTimer)
                 fallbackTimer = null
+              }
+            } else if (event.event === 'log-message') {
+              // 收集 mpv 內部訊息作診斷證據（只留與影片輸出/錯誤相關的）
+              const txt = String(event.text ?? '')
+              if (/vo|vid|wid|window|video|error|403|fail/i.test(txt)) {
+                setDiagLog((prev) => [...prev.slice(-40), `[${event.level}] ${txt.slice(0, 160)}`])
               }
             } else if (event.event === 'file-loaded') {
               void (async () => {
@@ -230,14 +271,7 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   }
 
   // 内建播放器 UI
-  // 備援中 / 已切換：畫面上方顯示狀態，並保留返回按鈕
-  const fallbackNotice = internalFailed ? (
-    externalLaunched
-      ? { text: t('internalFallbackStarted', language as any), tone: 'ok' as const }
-      : error
-        ? { text: error, tone: 'error' as const }
-        : { text: t('internalFallbackSwitching', language as any), tone: 'warn' as const }
-  ) : null
+  // 備援中 / 已切換：由下方 internalFailed 區塊顯示狀態，並保留返回按鈕
 
   return (
     <div className="min-h-screen bg-[#09090b] flex flex-col">
@@ -266,21 +300,49 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
         </div>
       </header>
 
-      {/* 備援狀態提示 */}
-      {fallbackNotice && (
-        <div
-          className={`px-4 py-2.5 text-sm flex items-center gap-2 ${
-            fallbackNotice.tone === 'error'
-              ? 'bg-[#7f1d1d]/40 text-[#fca5a5]'
-              : fallbackNotice.tone === 'ok'
-                ? 'bg-[#14532d]/40 text-[#86efac]'
-                : 'bg-[#78350f]/40 text-[#fcd34d]'
-          }`}
-        >
-          <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m4-7h-6m6 0h-6v13a1 1 0 001 1h6a1 1 0 001-1v-6a1 1 0 00-1-1h-5" />
-          </svg>
-          {fallbackNotice.text}
+      {/* 控制列：播放/暫停 + 進度 + 診斷資訊（libmpv 是裸核心，控制 UI 需自建） */}
+      {!internalFailed && (
+        <div className="flex items-center gap-3 px-4 py-2 bg-[#18181b] border-b border-[#27272a]">
+          <button
+            onClick={() => { void command('set', ['pause', !playing]).catch(() => {}) }}
+            disabled={!playing && !timePos}
+            className="w-8 h-8 rounded-full bg-[#a855f7] hover:bg-[#9333ea] disabled:opacity-40 text-white flex items-center justify-center transition-colors"
+            aria-label={playing ? 'pause' : 'play'}
+          >
+            {playing ? (
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z" /></svg>
+            ) : (
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+            )}
+          </button>
+          <span className="text-xs tabular-nums text-[#a1a1aa] w-11 text-right">{fmtTime(timePos)}</span>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(duration, 1)}
+            step={1}
+            value={Math.min(timePos, duration || 0)}
+            onChange={(e) => { void command('seek', [parseFloat(e.target.value), 'absolute']).catch(() => {}) }}
+            className="flex-1 accent-[#a855f7] cursor-pointer h-1.5"
+            aria-label="seek"
+          />
+          <span className="text-xs tabular-nums text-[#a1a1aa] w-11">{fmtTime(duration || null)}</span>
+          {/* 診斷：mpv 影像輸出裝置 + 最近 log */}
+          <details className="ml-2 text-xs">
+            <summary className="cursor-pointer text-[#71717a] hover:text-[#a855f7] select-none">診斷</summary>
+            <div className="mt-2 w-72 max-h-40 overflow-y-auto rounded bg-black/60 p-2 font-mono space-y-1">
+              <div className="text-[#fbbf24]">
+                video-vo = {videoVo || '（未知）'} ｜ videoSeen = {videoSeen ? '是' : '否'}
+              </div>
+              {diagLog.length === 0 ? (
+                <div className="text-[#71717a]">（尚無 mpv log）</div>
+              ) : (
+                diagLog.map((line, idx) => (
+                  <div key={idx} className="text-[#a1a1aa] break-all">{line}</div>
+                ))
+              )}
+            </div>
+          </details>
         </div>
       )}
 

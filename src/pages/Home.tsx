@@ -93,8 +93,8 @@ function SearchTab({
         </div>
 
         {showHistory && searchHistory.length > 0 && (
-          <div className="absolute z-40 top-full left-0 right-0 mt-1 bg-[#18181b] border border-[#27272a] rounded-lg shadow-xl overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-[#27272a]">
+          <div className="absolute z-40 top-full left-0 right-0 mt-1 bg-[#09090b]/85 backdrop-blur-md border border-[#27272a]/80 rounded-lg shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 border-b border-[#27272a]/60">
               <span className="text-xs text-[#a1a1aa]">{t('searchHistory', language as any)}</span>
               <button
                 onClick={() => searchHistory.forEach(onRemoveHistory)}
