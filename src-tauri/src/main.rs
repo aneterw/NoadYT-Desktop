@@ -653,8 +653,126 @@ fn find_python_exe() -> Result<String, String> {
     Err("Python executable not found. Please install Python and add it to PATH.".to_string())
 }
 
+/// 播放视频输入参数（用于外部播放器模式）
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayVideoInput {
+    video_id: String,
+    player: String,
+    subtitle_lang: String,
+    max_resolution: String,
+}
+
+/// 启动外部播放器（使用 Python run19.py 完整逻辑）
+#[command]
+fn play_video_external(input: PlayVideoInput) -> Result<String, String> {
+    dlog!("[DEBUG play_video_external] START video_id={} player={} subtitle_lang={} max_res={}",
+        input.video_id, input.player, input.subtitle_lang, input.max_resolution);
+
+    let args = vec![
+        "--play",
+        &input.video_id,
+        &input.player,
+        &input.subtitle_lang,
+        &input.max_resolution,
+    ];
+
+    match run_extractor(&args) {
+        Ok(_) => Ok(format!("已启动 {} 播放器", input.player)),
+        Err(e) => Err(format!("播放失败: {}", e)),
+    }
+}
+
+/// 检查 Python 执行环境
+#[command]
+fn check_python_environment() -> Result<serde_json::Value, String> {
+    let py_exe = find_python_exe();
+    match py_exe {
+        Ok(path) => {
+            let version_output = Command::new(&path)
+                .arg("--version")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "unknown".to_string());
+            Ok(serde_json::json!({
+                "ok": true,
+                "python_path": path,
+                "version": version_output
+            }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "ok": false,
+            "error": e
+        })),
+    }
+}
+
+/// 写入日志（前端调用）
+#[command]
+fn write_log(message: String) -> Result<bool, String> {
+    log_to_file(&message);
+    Ok(true)
+}
+
+/// 获取频道视频列表
+#[command]
+fn get_channel_videos(channel_url: String) -> Result<SearchVideosOutput, String> {
+    // 从URL中提取channel_id或handle
+    let channel_id = if channel_url.contains("/channel/") {
+        channel_url.split("/channel/").nth(1)
+            .and_then(|s| s.split('/').next())
+            .unwrap_or("")
+    } else if channel_url.contains("/c/") {
+        channel_url.split("/c/").nth(1)
+            .and_then(|s| s.split('/').next())
+            .unwrap_or("")
+    } else if channel_url.contains("/@") {
+        channel_url.split("/@").nth(1)
+            .and_then(|s| s.split('/').next())
+            .unwrap_or("")
+    } else {
+        ""
+    };
+
+    if channel_id.is_empty() {
+        return Ok(SearchVideosOutput {
+            ok: false,
+            data: serde_json::Value::Array(vec![]),
+            error: Some("Could not parse channel ID from URL".to_string()),
+        });
+    }
+
+    // 使用yt-dlp搜索频道视频
+    let search_query = format!("site:youtube.com/watch?v={}", channel_id);
+    let args = vec![
+        "--search",
+        &search_query,
+        "60",
+    ];
+    let json = run_extractor(&args)?;
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
+    Ok(SearchVideosOutput {
+        ok: true,
+        data,
+        error: None,
+    })
+}
+
 fn main() {
-    Builder::default()
+    tauri::Builder::default()
+        .plugin(tauri_plugin_libmpv::init())
+        .invoke_handler(tauri::generate_handler![
+            search_videos,
+            search_channels,
+            get_stream_url,
+            play_with_external_player,
+            play_video_external,
+            clear_cache,
+            check_python_environment,
+            write_log,
+            read_binary_file,
+            get_channel_videos,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

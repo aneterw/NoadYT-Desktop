@@ -16,7 +16,8 @@
         "height": 1000,
         "resizable": true,
         "fullscreen": false,
-        "maximizable": true
+        "maximizable": true,
+        "transparent": false
       }
     ],
     "security": {
@@ -24,13 +25,34 @@
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]
-      }
+      },
+      "capabilities": [
+        {
+          "identifier": "main-capability",
+          "description": "Main application capability",
+          "windows": ["main"],
+          "permissions": [
+            "core:default",
+            "core:window:default",
+            "core:app:default",
+            "core:event:default",
+            "core:webview:default",
+            "core:path:default"
+          ]
+        },
+        {
+          "identifier": "capability-libmpv",
+          "description": "Allow libmpv plugin commands",
+          "windows": ["main"],
+          "permissions": ["libmpv:default"]
+        }
+      ]
     }
   },
   "bundle": {
     "active": true,
     "targets": ["msi"],
     "icon": ["icons/icon.ico"],
-    "resources": ["icons/icon.ico", "resources/python/**/*", "resources/ffmpeg/**/*"]
+    "resources": ["icons/icon.ico", "resources/python/**/*", "resources/ffmpeg/**/*", "lib/**/*"]
   }
 }

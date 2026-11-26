@@ -4,12 +4,37 @@
 import yt_dlp
 import json
 import logging
+import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from typing import Dict, List, Optional, Any
+from urllib.parse import urlunparse
+import requests
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import (
+    NoTranscriptFound,
+    TranscriptsDisabled,
+    VideoUnavailable,
+)
+from youtube_transcript_api.formatters import WebVTTFormatter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# ═══════════════════════════════════════════════════════════════════
+# Global Settings (run19.py) - 可在此切換播放器與影片設定
+# ═══════════════════════════════════════════════════════════════════
+PREFERRED_PLAYER = 'mpv'       # 'mpv' or 'vlc'
+MAX_RESOLUTION = 'auto'        # 'auto' or 1080, 720, 480, 360
+AUTO_USE_MPV_FOR_LIVE = True   # Force MPV for LIVE streams
+LIVE_PREFER_30FPS = True       # Prefer 30fps for LIVE streams
+LIVE_AUDIO_DELAY = 0.0         # Audio delay in seconds for LIVE streams
+VIDEO_ID = 'OTOwdx4Be7M'       # Video ID or URL
+PREFERRED_LANGUAGES = ['zh-TW', 'zh-Hant', 'zh-Hans', 'zh', 'en', 'ja', 'ko', 'es', 'de', 'fr']
+# ═══════════════════════════════════════════════════════════════════
 
 class YouTubeExtractor:
     """Wrapper for yt-dlp to extract YouTube video info and streams"""
@@ -31,10 +56,10 @@ class YouTubeExtractor:
             'extract_flat': False,
             'skip_download': True,
 
-            # 字幕設定
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': ['zh-Hant', 'en', 'ja-orig', 'ja', 'zh-Hans', 'ko'],
+            # 字幕設定：不啟用自動下載（由 play_video 獨立處理）
+            'writesubtitles': False,
+            'writeautomaticsub': False,
+            # 'subtitleslangs': ['zh-Hant', 'en', 'ja-orig', 'ja', 'zh-Hans', 'ko'],
         }
 
         # 🎯 一般影片 (VOD)：優先 1080p+ DASH (獨立影片+音訊)
@@ -197,6 +222,8 @@ class YouTubeExtractor:
                 'language': f.get('language'),
                 # Add manifest_url for DASH/HLS streaming
                 'manifest_url': manifest_url,
+                # Preserve HTTP headers (User-Agent) for libmpv to avoid YouTube 403
+                'http_headers': f.get('http_headers', {}),
             })
 
         # Sort by quality (height descending)
@@ -718,95 +745,8 @@ def get_target_video_url_web(client_version: str = '19.29.1') -> str:
         logger.error(f"get_target_video_url_web error: {e}")
         return ""
 
-def download_video(video_id: str, max_height: int = 1080, ffmpeg_location: str = "", subtitle_mode: str = "auto") -> str:
-    """用 yt-dlp 下載 bestvideo+bestaudio 並用 ffmpeg 合併成 MP4 檔案，
-    同時提取 timedtext 字幕並緩存為 VTT，回傳 JSON 字符串。
+pass
 
-    subtitle_mode:
-      - "auto":   YTA 優先 → timedtext fallback（字幕自動偵測）
-      - "none":   timedtext 優先 → YTA fallback（指定解析度時使用）
-
-    所有模式：先下載字幕（看有沒有字幕可下載），再處理影片。
-    """
-    import yt_dlp
-    import os
-    import tempfile
-    import json
-
-    cache_dir = os.path.join(tempfile.gettempdir(), 'NoadYT-Desktop', 'downloads')
-    os.makedirs(cache_dir, exist_ok=True)
-
-    out_path = os.path.join(cache_dir, f"{video_id}.mp4")
-
-    # 步驟 1：先下載字幕（所有模式都執行，使用 subtitle_mode 作為語言偏好獲取字幕）
-    subtitles_tracks = []
-    try:
-        info = _extractor.extract_video_info(video_id, subtitle_mode)  # 使用用戶選擇的語言偏好
-        info_dict = json.loads(info) if isinstance(info, str) else info
-        for tr in info_dict.get('subtitles', []):
-            src = tr.get('local_path')
-            if not src or not os.path.exists(src):
-                continue
-            # 字幕檔名 match 影片：{video_id}.vtt，放在與影片同一目錄，不加語言後綴
-            match_name = f"{video_id}.vtt"
-            match_path = os.path.join(cache_dir, match_name)
-            try:
-                import shutil
-                if os.path.abspath(src) != os.path.abspath(match_path):
-                    shutil.copy2(src, match_path)
-            except Exception as copy_err:
-                logger.warning(f"[DownloadVideo] 複製字幕到 match 路徑失敗: {copy_err}")
-                match_path = src
-            subtitles_tracks.append({
-                'language': tr.get('language', ''),
-                'name': tr.get('name', tr.get('language', '')),
-                'path': match_path,
-            })
-        logger.info(f"[DownloadVideo] 字幕軌道數: {len(subtitles_tracks)}")
-    except Exception as e:
-        logger.warning(f"[DownloadVideo] 字幕下載失敗（繼續處理影片）: {e}")
-
-    # 步驟 2：若已下載過影片，直接回傳路徑
-    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-        logger.info(f"[DownloadVideo] 已存在: {out_path}")
-        return json.dumps({"ok": True, "path": out_path, "subtitles": subtitles_tracks}, ensure_ascii=False)
-
-    opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'format': f'bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]/best',
-        'merge_output_format': 'mp4',
-        'outtmpl': os.path.join(cache_dir, f"{video_id}.%(ext)s"),
-        'js_runtimes': {'node': {}},
-        'remote_components': 'ejs:github',
-    }
-
-    if ffmpeg_location:
-        opts['ffmpeg_location'] = ffmpeg_location
-
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-
-        # 尋找下載後的 MP4 檔案
-        for f in os.listdir(cache_dir):
-            if f.startswith(video_id) and f.endswith('.mp4'):
-                full = os.path.join(cache_dir, f)
-                logger.info(f"[DownloadVideo] 下載完成: {full}")
-                return json.dumps({"ok": True, "path": full, "subtitles": subtitles_tracks}, ensure_ascii=False)
-
-        logger.error(f"[DownloadVideo] 找不到下載後的 MP4 檔案: {cache_dir}")
-        return json.dumps({"ok": False, "error": "找不到下載後的 MP4 檔案"}, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"[DownloadVideo] 下載失敗: {e}")
-        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
-
-# 全局狀態：記錄最近一次目標影片 ID（供 web client fallback 使用）
-_last_target_video_id = ""
-
-# ═══════════════════════════════════════════════════════════
-# 頻道搜尋模組（_channel_search.py 獨立邏輯，不影響影片搜尋）
-# ═══════════════════════════════════════════════════════════
 
 def _extract_best_avatar(thumbnails: list) -> Optional[str]:
     """從 thumbnails 列表選取最佳大頭貼（square，優先 uncropped）"""
@@ -947,6 +887,267 @@ def get_channel_videos(channel_url: str, max_videos: int = 40) -> str:
     return json.dumps(videos, ensure_ascii=False)
 
 
+
+def build_youtube_url(video_id: str) -> str:
+    """動態組裝 YouTube 觀看頁面 URL"""
+    host = '.'.join(['www', 'youtube', 'com'])
+    return urlunparse(('https', host, '/watch', '', f'v={video_id}', ''))
+
+
+def parse_max_resolution(max_res: str | int | None) -> int | None:
+    if max_res is None:
+        return None
+    if isinstance(max_res, int):
+        return max_res if max_res > 0 else None
+    val = str(max_res).strip().lower().rstrip('p')
+    if val in ('', 'auto', 'none', 'max', 'best'):
+        return None
+    if val.isdigit() and int(val) > 0:
+        return int(val)
+    return None
+
+
+def build_format_str(is_live: bool, p_name: str, max_res: int | None) -> str:
+    h_filter = f'[height<={max_res}]' if max_res else ''
+
+    if is_live and p_name == 'mpv':
+        if LIVE_PREFER_30FPS:
+            return (
+                f'bestvideo{h_filter}[fps<=30][vcodec^=avc1]+bestaudio/'
+                f'bestvideo{h_filter}[vcodec^=avc1]+bestaudio/'
+                f'best{h_filter}/best'
+            )
+        return (
+            f'bestvideo{h_filter}[vcodec^=avc1]+bestaudio/'
+            f'best{h_filter}/best'
+        )
+
+    if is_live:
+        return f'best{h_filter}[vcodec!=none][acodec!=none]/best{h_filter}/best'
+
+    return f'bestvideo{h_filter}+bestaudio/best{h_filter}/best'
+
+
+def find_vlc() -> str | None:
+    env_vlc = shutil.which('vlc')
+    if env_vlc:
+        return env_vlc
+    p1 = r'C:\Program Files\VideoLAN\VLC\vlc.exe'
+    p2 = r'C:\Program Files (x86)\VideoLAN\VLC\vlc.exe'
+    for p in (p1, p2):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def find_mpv() -> str | None:
+    env_mpv = shutil.which('mpv')
+    if env_mpv:
+        return env_mpv
+    p1 = r'C:\mpv\mpv.exe'
+    p2 = r'C:\Program Files\mpv\mpv.exe'
+    p3 = os.path.expanduser(r'~\scoop\apps\mpv\current\mpv.exe')
+    for p in (p1, p2, p3):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def resolve_player(preferred: str, is_live: bool = False) -> tuple[str | None, str | None]:
+    """參考 run19.py：直播一律使用 MPV，不管使用者選什麼播放器"""
+    vlc_exe = find_vlc()
+    mpv_exe = find_mpv()
+
+    if is_live and AUTO_USE_MPV_FOR_LIVE and mpv_exe:
+        return 'mpv', mpv_exe
+
+    pref = preferred.strip().lower()
+    if pref == 'vlc':
+        if vlc_exe:
+            return 'vlc', vlc_exe
+        if mpv_exe:
+            return 'mpv', mpv_exe
+    else:
+        if mpv_exe:
+            return 'mpv', mpv_exe
+        if vlc_exe:
+            return 'vlc', vlc_exe
+    return None, None
+
+
+def download_subtitles_tempdir(video_id: str, target_languages: list[str], sub_dir: str) -> str | None:
+    """字幕下載至指定目錄，供 MPV/VLC 讀取"""
+    if not target_languages:
+        print('[Subtitle] Language list is empty, skipping subtitle download.')
+        return None
+
+    ytt_api = YouTubeTranscriptApi()
+    vtt_formatter = WebVTTFormatter()
+    yta_file = None
+    native_file = None
+
+    try:
+        t_list = ytt_api.list(video_id)
+        print(f'=== Available subtitles for {video_id} ===')
+        avail = []
+        for t in t_list:
+            tag = 'Manual' if not t.is_generated else 'ASR'
+            print(f'- {t.language} ({t.language_code}) -> [{tag}]')
+            avail.append(t.language_code)
+
+        if not avail:
+            print('No subtitles available.')
+            return None
+
+        search = [lang for lang in target_languages if lang in avail]
+        if not search:
+            search = [next(iter(avail))]
+            print(f'Fallback language: {search}')
+
+        transcript = t_list.find_transcript(search)
+        code = transcript.language_code
+        src = 'manual' if not transcript.is_generated else 'auto'
+        print(f'Selected subtitle: {transcript.language} ({code}) [{src}]')
+
+        # YTA
+        try:
+            data = transcript.fetch()
+            vtt_text = vtt_formatter.format_transcript(data)
+            if vtt_text.strip():
+                f_yta = os.path.join(sub_dir, f'{video_id}_{code}_{src}_yta.vtt')
+                with open(f_yta, 'w', encoding='utf-8') as f:
+                    f.write(vtt_text)
+                yta_file = f_yta
+                print(f'[OK 1/2] Saved YTA VTT: {f_yta}')
+        except Exception as e:
+            print(f'[Fail 1/2] YTA VTT error: {e}')
+
+        # TimedText
+        try:
+            res = requests.get(f'{transcript._url}&fmt=vtt', timeout=10)
+            res.raise_for_status()
+            if res.text.strip():
+                f_nat = os.path.join(sub_dir, f'{video_id}_{code}_{src}_timedtext.vtt')
+                with open(f_nat, 'w', encoding='utf-8') as f:
+                    f.write(res.text)
+                native_file = f_nat
+                print(f'[OK 2/2] Saved native VTT: {f_nat}')
+        except Exception as e:
+            print(f'[Fail 2/2] Native VTT error: {e}')
+
+    except TranscriptsDisabled:
+        print(f'Subtitles disabled for {video_id}.')
+    except VideoUnavailable:
+        print(f'Video {video_id} unavailable.')
+    except NoTranscriptFound:
+        print(f'No transcript found for {target_languages}.')
+    except Exception as e:
+        print(f'Subtitle error: {e}')
+
+    if native_file and os.path.exists(native_file):
+        print(f'[Subtitle] Using native: {native_file}')
+        return native_file
+    if yta_file and os.path.exists(yta_file):
+        print(f'[Subtitle] Using YTA: {yta_file}')
+        return yta_file
+
+    print('[Subtitle] Playing without subtitles.')
+    return None
+
+
+def launch_detached(cmd: list[str]):
+    """以獨立背景程序啟動播放器，避免卡住 Tauri 主程式"""
+    import subprocess
+    if sys.platform == 'win32':
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(cmd, creationflags=flags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+    else:
+        subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+
+
+def play_video(video_id: str, player_pref: str, subtitle_lang: str, max_resolution: str = 'auto'):
+    """run19.py 播放邏輯：偵測 LIVE/一般影片，自動選擇播放器，支援字幕、解析度設定"""
+    import tempfile
+
+    url = build_youtube_url(video_id)
+    target_langs = [subtitle_lang] if subtitle_lang and subtitle_lang not in ('auto', 'none', '') else ['zh-TW', 'zh-Hant', 'zh-Hans', 'zh', 'en', 'ja']
+    parsed_res = parse_max_resolution(max_resolution)
+    res_label = f'Max {parsed_res}p' if parsed_res else 'auto (Best)'
+
+    try:
+        opts = {'format': 'bestvideo+bestaudio/best', 'quiet': True, 'no_warnings': True,
+                'js_runtimes': {'node': {}}, 'remote_components': 'ejs:github'}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            meta = ydl.extract_info(url, download=False)
+
+        is_live = bool(meta.get('is_live'))
+        title = meta.get('title', 'Unknown Title')
+
+        p_name, p_exe = resolve_player(player_pref, is_live=is_live)
+        if not p_name or not p_exe:
+            return json.dumps({'error': '找不到 MPV 或 VLC 播放器'}, ensure_ascii=False)
+            sys.exit(1)
+
+        # 字幕：僅非直播時下載，存放於 tempdir/NoadYT-Desktop/subtitles/
+        sub_path = None
+        if not is_live:
+            sub_dir = os.path.join(tempfile.gettempdir(), 'NoadYT-Desktop', 'subtitles')
+            os.makedirs(sub_dir, exist_ok=True)
+            sub_path = download_subtitles_tempdir(video_id, target_langs, sub_dir)
+
+        # 取得串流 URL（參考 run19.py fetch_urls）
+        fmt = build_format_str(is_live, p_name, parsed_res)
+        ydl_opts = {'format': fmt, 'quiet': True, 'no_warnings': True,
+                    'js_runtimes': {'node': {}}, 'remote_components': 'ejs:github'}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        fmts = info.get('requested_formats')
+        if fmts and len(fmts) >= 2:
+            it = iter(fmts)
+            v_url = next(it)['url']
+            a_url = next(it)['url']
+        else:
+            v_url = info.get('url', '')
+            a_url = None
+
+        # 構建命令（嚴格按照 run19.py make_cmd）
+        if p_name == 'vlc':
+            cmd = [
+                p_exe,
+                v_url,                              # URL 必須在最前面
+                f'--meta-title={title}',           # --meta-title（不是 --force-media-title）
+                '--network-caching=3000',
+                '--play-and-exit',
+            ]
+            if a_url:
+                cmd.append(f'--input-slave={a_url}')
+            if sub_path:
+                cmd.append(f'--sub-file={sub_path}')
+        else:
+            cmd = [p_exe, f'--force-media-title={title}']
+            if is_live:
+                lf = f'--ytdl-format={build_format_str(is_live, p_name, parsed_res)}'
+                cmd.extend([lf, '--hwdec=auto-safe', '--video-sync=audio', '--framedrop=vo',
+                           '--cache=yes', '--demuxer-readahead-secs=5', '--demuxer-max-bytes=50M'])
+                if LIVE_AUDIO_DELAY != 0.0:
+                    cmd.append(f'--audio-delay={LIVE_AUDIO_DELAY}')
+            cmd.append(v_url)
+            if a_url:
+                cmd.append(f'--audio-file={a_url}')
+            if sub_path:
+                cmd.append(f'--sub-file={sub_path}')
+
+        launch_detached(cmd)
+        return json.dumps({'ok': True, 'player': p_name, 'exe': p_exe, 'is_live': is_live, 'title': title}, ensure_ascii=False)
+
+    except Exception as e:
+        print(f'[PLAY ERROR] {e}', file=sys.stderr)
+        _emit({'error': f'播放失敗: {e}'})
+        sys.exit(1)
+
+
+
+
 # ═════════════════════════════════════════════════════════════════
 # Windows Sidecar CLI entry (Tauri Rust 呼叫此腳本，讀取 stdout JSON)
 # ═════════════════════════════════════════════════════════════════
@@ -964,7 +1165,7 @@ if __name__ == "__main__":
             print(text)
 
     if len(sys.argv) < 2:
-        _emit({"error": "usage: python youtube_extractor.py --search <keyword> | --info <video_id> [lang] | --playlist <id> | --channels <keyword> | --download <video_id> [max_height]"})
+        _emit({"error": "usage: python youtube_extractor.py --search <keyword> | --info <video_id> [lang] | --play <video_id> <player> [lang] [max_resolution]"})
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -974,20 +1175,18 @@ if __name__ == "__main__":
         elif cmd == "--info" and len(sys.argv) >= 3:
             pref = sys.argv[3] if len(sys.argv) >= 4 else "none"
             _emit(json.loads(get_video_info(sys.argv[2], pref)))
-        elif cmd == "--playlist" and len(sys.argv) >= 3:
-            _emit(json.loads(get_playlist_videos(sys.argv[2])))
-        elif cmd == "--channels" and len(sys.argv) >= 3:
-            _emit(json.loads(search_channels(sys.argv[2])))
-        elif cmd == "--download" and len(sys.argv) >= 3:
-            max_h = int(sys.argv[3]) if len(sys.argv) >= 4 else 1080
-            ffmpeg_loc = sys.argv[4] if len(sys.argv) >= 5 else ""
-            subtitle_mode = sys.argv[5] if len(sys.argv) >= 6 else "auto"
-            result = download_video(sys.argv[2], max_h, ffmpeg_loc, subtitle_mode)
-            # download_video 已經回傳 JSON 字符串，解析後 emit
-            try:
-                _emit(json.loads(result))
-            except Exception:
-                _emit({"ok": False, "error": result})
+        elif cmd == "--play" and len(sys.argv) >= 4:
+            video_id = sys.argv[2]
+            player_pref = sys.argv[3]
+            lang = sys.argv[4] if len(sys.argv) >= 5 else "auto"
+            max_res = sys.argv[5] if len(sys.argv) >= 6 else "auto"
+            play_video(video_id, player_pref, lang, max_res)
+        elif cmd == "--prepare" and len(sys.argv) >= 4:
+            video_id = sys.argv[2]
+            player_pref = sys.argv[3]
+            lang = sys.argv[4] if len(sys.argv) >= 5 else "auto"
+            max_res = sys.argv[5] if len(sys.argv) >= 6 else "auto"
+            play_video(video_id, player_pref, lang, max_res)
         else:
             _emit({"error": "unknown command or missing argument"})
             sys.exit(1)

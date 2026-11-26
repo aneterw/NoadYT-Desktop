@@ -6,7 +6,24 @@ body {
   margin: 0;
 }
 
-/* WebVTT 字幕樣式 */
+/* 動畫：旋轉 */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+/* 動畫：脈衝 */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* WebVTT 字幕樣式（內建 libmpv 使用系統字幕，這裡供原生 <video> 參考） */
 video::cue {
   font-size: 14px !important;
   font-family: sans-serif;
@@ -16,4 +33,27 @@ video::cue {
   padding: 4px 8px;
   border-radius: 4px;
   line-height: 1.4;
+}
+
+/* 捲軸樣式（Windows 風格） */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #09090b;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f3f46;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b;
+}
+
+/* 數字輸入框去掉旋鈕 */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }

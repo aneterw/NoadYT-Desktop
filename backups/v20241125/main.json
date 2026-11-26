@@ -1,0 +1,10 @@
+{
+  "identifier": "main-capability",
+  "description": "Main application capability - all commands allowed",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "libmpv:default"
+  ]
+}

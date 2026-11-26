@@ -1,0 +1,23 @@
+{
+  "identifier": "main-capability",
+  "description": "Main application capability - allows all custom commands",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "custom:allow-all",
+      "allow": [
+        {"command": "search_videos"},
+        {"command": "search_channels"},
+        {"command": "get_channel_videos"},
+        {"command": "get_stream_url"},
+        {"command": "play_with_external_player"},
+        {"command": "check_python_environment"},
+        {"command": "clear_cache"},
+        {"command": "write_log"},
+        {"command": "read_binary_file"}
+      ]
+    }
+  ]
+}
