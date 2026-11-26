@@ -104,6 +104,30 @@ export async function checkPythonEnvironment(): Promise<{ ok: boolean; pythonPat
   return callCommand<{ ok: boolean; python_path?: string; version?: string; error?: string }>('check_python_environment', {})
 }
 
+/** 完整環境檢查：Python、必要套件、ffmpeg、播放器 */
+export interface EnvPackageStatus {
+  name: string
+  ok: boolean
+}
+export interface EnvironmentCheck {
+  pythonOk: boolean
+  pythonPath?: string | null
+  pythonVersion?: string | null
+  packages: EnvPackageStatus[]
+  ffmpegOk: boolean
+  ffmpegPath?: string | null
+  vlc?: string | null
+  mpv?: string | null
+}
+export async function checkEnvironment(): Promise<EnvironmentCheck> {
+  return callCommand<EnvironmentCheck>('check_environment', {})
+}
+
+/** 一鍵安裝缺的 Python 套件（yt-dlp、requests、youtube-transcript-api） */
+export async function installPythonDeps(): Promise<string> {
+  return callCommand<string>('install_python_deps', {})
+}
+
 /** 讀取二進制檔案（用於字幕預載） */
 export async function readBinaryFile(path: string): Promise<Uint8Array> {
   return callCommand<Uint8Array>('read_binary_file', { path })

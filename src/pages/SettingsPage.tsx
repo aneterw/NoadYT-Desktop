@@ -6,7 +6,7 @@ import type {
   ExternalPlayer,
 } from '@/lib/types'
 import { t } from '@/lib/i18n'
-import { detectPlayers, openUrl } from '@/lib/api'
+import { openUrl, checkEnvironment, installPythonDeps, type EnvironmentCheck } from '@/lib/api'
 import {
   useApp,
   RESOLUTION_OPTIONS,
@@ -106,6 +106,40 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
   const [playerPaths, setPlayerPaths] = useState<{ vlc: string | null; mpv: string | null } | null>(null)
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [savedToast, setSavedToast] = useState(false)
+  const [env, setEnv] = useState<EnvironmentCheck | null>(null)
+  const [installingDeps, setInstallingDeps] = useState(false)
+  const [installMsg, setInstallMsg] = useState('')
+
+  // 環境檢查（Python / 必要套件 / ffmpeg / 播放器）
+  const refreshEnv = useCallback(async () => {
+    try {
+      const result = await checkEnvironment()
+      setEnv(result)
+      setPlayerPaths({ vlc: result.vlc ?? null, mpv: result.mpv ?? null })
+    } catch {
+      setEnv(null)
+      setPlayerPaths({ vlc: null, mpv: null })
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshEnv()
+  }, [refreshEnv])
+
+  /** 一鍵安裝缺的 Python 套件 */
+  const handleInstallDeps = useCallback(async () => {
+    setInstallingDeps(true)
+    setInstallMsg('')
+    try {
+      const result = await installPythonDeps()
+      setInstallMsg(`✅ ${result}`)
+      await refreshEnv()
+    } catch (err: unknown) {
+      setInstallMsg(`❌ ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setInstallingDeps(false)
+    }
+  }, [refreshEnv])
 
   const {
     language: currentLang,
@@ -117,13 +151,6 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
     searchLimit,
     channelLimit,
   } = settings
-
-  // 偵測外部播放器主程式路徑
-  useEffect(() => {
-    detectPlayers()
-      .then(setPlayerPaths)
-      .catch(() => setPlayerPaths({ vlc: null, mpv: null }))
-  }, [])
 
   const clearCache = useCallback(async () => {
     if (!window.confirm(t('clearSubtitleCache', langKey))) return
@@ -190,6 +217,112 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
             <h1 className="text-2xl font-bold text-[#e4e4e7] mb-2">{t('settings', langKey)}</h1>
             <p className="text-[#a1a1aa] text-sm">{t('settingsDesc', langKey)}</p>
           </div>
+
+          {/* 環境狀態：Python / 必要套件 / ffmpeg / 播放器 */}
+          <Section title={t('envStatus', langKey)} desc={t('envDesc', langKey)}>
+            {env === null ? (
+              <div className="text-xs text-[#a1a1aa]">檢查中...</div>
+            ) : (
+              <div className="space-y-3 text-xs">
+                {/* 總體狀態 */}
+                {env.pythonOk && env.ffmpegOk && env.packages.every((p) => p.ok) && (
+                  <div className="px-3 py-2 rounded-lg border border-[#166534]/50 bg-[#166534]/15 text-[#4ade80] font-medium">
+                    ✅ {t('envAllOk', langKey)}
+                  </div>
+                )}
+
+                {/* Python */}
+                <div className="px-3 py-2 rounded-lg border border-[#27272a] bg-[#09090b]">
+                  {env.pythonOk ? (
+                    <div className="flex items-center gap-2 flex-1">
+                      <span className="text-[#4ade80] shrink-0">{t('envDetected', langKey)}</span>
+                      <span className="text-[#a1a1aa]">{env.pythonVersion}</span>
+                    </div>
+                  ) : (
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[#f87171] font-medium">{t('envPython', langKey)} {t('envNotDetected', langKey)}</span>
+                      </div>
+                      <p className="mt-1.5 text-[#fbbf24] leading-relaxed">{t('envPythonHint', langKey)}</p>
+                      <button
+                        onClick={() => { void openUrl('https://www.python.org/downloads/') }}
+                        className="mt-2 px-3 py-1.5 rounded text-xs font-medium bg-[#27272a] border border-[#f59e0b]/40 text-[#fbbf24] hover:bg-[#3f3f46] transition-colors"
+                      >
+                        {t('envPythonSite', langKey)} ↗
+                      </button>
+                    </div>
+                  )}
+                  <EnvDot ok={env.pythonOk} />
+                </div>
+
+                {/* 必要套件 */}
+                <div className="px-3 py-2 rounded-lg border border-[#27272a] bg-[#09090b]">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[#e4e4e7] font-medium flex-1">{t('envPackages', langKey)}</span>
+                    {env.packages.length > 0 && (
+                      <span className="text-[#a1a1aa]">
+                        {env.packages.filter((p) => p.ok).length}/{env.packages.length}
+                      </span>
+                    )}
+                    <EnvDot ok={env.packages.every((p) => p.ok)} />
+                  </div>
+                  {env.packages.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {env.packages.map((p) => (
+                        <div key={p.name} className="flex items-center gap-2">
+                          <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${p.ok ? 'bg-[#4ade80]' : 'bg-[#f87171]'}`} />
+                          <span className={p.ok ? 'text-[#a1a1aa]' : 'text-[#f87171]'}>{p.name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {env.pythonOk && !env.packages.every((p) => p.ok) && (
+                    <div className="mt-3 space-y-2">
+                      <p className="text-[#fbbf24]">
+                        {t('envMissingPkgHint', langKey)}{' '}
+                        {env.packages.filter((p) => !p.ok).map((p) => p.name).join('、')}
+                      </p>
+                      <button
+                        onClick={() => { void handleInstallDeps() }}
+                        disabled={installingDeps}
+                        className="px-3 py-1.5 rounded text-xs font-medium bg-[#a855f7] hover:bg-[#9333ea] text-white disabled:opacity-50 transition-colors"
+                      >
+                        {installingDeps ? t('envInstalling', langKey) : t('envInstallDeps', langKey)}
+                      </button>
+                      {installMsg && (
+                        <p className={`text-[11px] leading-relaxed ${installMsg.startsWith('✅') ? 'text-[#4ade80]' : 'text-[#f87171]'}`}>
+                          {installMsg}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {/* ffmpeg */}
+                <div className="px-3 py-2 rounded-lg border border-[#27272a] bg-[#09090b] flex items-center gap-2">
+                  <span className="text-[#e4e4e7] font-medium flex-1">{t('envFfmpeg', langKey)}</span>
+                  <span className={env.ffmpegOk ? 'text-[#4ade80]' : 'text-[#f87171]'}>
+                    {env.ffmpegOk ? t('envDetected', langKey) : t('envNotDetected', langKey)}
+                  </span>
+                  <EnvDot ok={env.ffmpegOk} />
+                </div>
+
+                {/* 播放器 */}
+                <div className="px-3 py-2 rounded-lg border border-[#27272a] bg-[#09090b] space-y-1.5">
+                  <div className="text-[#e4e4e7] font-medium">{t('externalPlayer', langKey)}</div>
+                  {(['mpv', 'vlc'] as const).map((name) => (
+                    <div key={name} className="flex items-center gap-2">
+                      <span className="font-mono text-[#a1a1aa] w-10 shrink-0">{name.toUpperCase()}</span>
+                      <span className={env[name] ? 'text-[#4ade80]' : 'text-[#f87171]'}>
+                        {env[name] ? t('envDetected', langKey) : t('envNotDetected', langKey)}
+                      </span>
+                      <EnvDot ok={!!env[name]} />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Section>
 
           {/* 介面語言 */}
           <Section title={t('language', langKey)} desc={t('languageDesc', langKey)}>
@@ -414,6 +547,12 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
 }
 
 /* ---------- 小型 UI 元件 ---------- */
+
+function EnvDot({ ok }: { ok: boolean }) {
+  return (
+    <span className={`w-2 h-2 rounded-full shrink-0 ${ok ? 'bg-[#4ade80]' : 'bg-[#f87171]'}`} />
+  )
+}
 
 function Section({ title, desc, children }: { title: string; desc: string; children: ReactNode }) {
   return (

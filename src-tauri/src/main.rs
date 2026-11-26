@@ -500,6 +500,139 @@ fn check_python_environment() -> Result<serde_json::Value, String> {
     }
 }
 
+/// 完整環境檢查（Python、必要套件、ffmpeg、播放器），一次回傳供設定頁「環境狀態」區塊顯示
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvCheckOutput {
+    python_ok: bool,
+    python_path: Option<String>,
+    python_version: Option<String>,
+    packages: Vec<EnvPackageStatus>,
+    ffmpeg_ok: bool,
+    ffmpeg_path: Option<String>,
+    vlc: Option<String>,
+    mpv: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvPackageStatus {
+    name: String,
+    ok: bool,
+}
+
+const REQUIRED_PYTHON_PACKAGES: [&str; 3] = ["yt_dlp", "requests", "youtube_transcript_api"];
+
+fn python_resources_dir() -> Option<std::path::PathBuf> {
+    let exe_path = std::env::current_exe().ok()?;
+    let dir = exe_path.parent()?;
+    let resources = dir.join("resources");
+    resources.exists().then_some(resources)
+}
+
+fn probe_python_package(py_exe: &str, package: &str) -> bool {
+    let script = format!("import {package}; print('OK')");
+    let out = Command::new(py_exe)
+        .arg("-c")
+        .arg(&script)
+        .output();
+    match out {
+        Ok(o) => o.status.success()
+            && String::from_utf8_lossy(&o.stdout).contains("OK"),
+        Err(_) => false,
+    }
+}
+
+/// 完整環境檢查
+#[command]
+fn check_environment() -> EnvCheckOutput {
+    let players = detect_players();
+    // ffmpeg：dev 在專案 resources/ffmpeg，release 在 exe 同目錄 resources/ffmpeg
+    let ffmpeg_path = if cfg!(debug_assertions) {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        Some(std::path::Path::new(manifest_dir)
+            .join("resources")
+            .join("ffmpeg")
+            .join("ffmpeg.exe"))
+    } else {
+        python_resources_dir().map(|r| r.join("ffmpeg").join("ffmpeg.exe"))
+    };
+    let ffmpeg_path = ffmpeg_path.filter(|p| p.exists());
+
+    let py_exe = find_python_exe();
+    let (python_ok, python_path, python_version, packages) = match py_exe {
+        Ok(path) => {
+            let version = Command::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "unknown".to_string());
+            let pkgs = REQUIRED_PYTHON_PACKAGES
+                .iter()
+                .map(|name| EnvPackageStatus {
+                    name: name.to_string(),
+                    ok: probe_python_package(&path, name),
+                })
+                .collect();
+            (true, Some(path), Some(version), pkgs)
+        }
+        Err(_) => (false, None, None, Vec::<EnvPackageStatus>::new()),
+    };
+
+    EnvCheckOutput {
+        python_ok,
+        python_path,
+        python_version,
+        packages,
+        ffmpeg_ok: ffmpeg_path.is_some(),
+        ffmpeg_path: ffmpeg_path.map(|p| p.to_string_lossy().into_owned()),
+        vlc: players.vlc,
+        mpv: players.mpv,
+    }
+}
+
+/// 一鍵安裝缺的 Python 套件（pip install yt-dlp requests youtube-transcript-api）
+#[command]
+fn install_python_deps() -> Result<String, String> {
+    let py_exe = find_python_exe()
+        .map_err(|e| format!("找不到 Python：{}（請先安裝 Python 並加入 PATH）", e))?;
+    // 先探測缺哪些套件，全齊則無需安裝
+    let missing: Vec<String> = REQUIRED_PYTHON_PACKAGES
+        .iter()
+        .filter(|name| !probe_python_package(&py_exe, name))
+        .map(|s| s.to_string())
+        .collect();
+    if missing.is_empty() {
+        return Ok("所有必要套件已安裝".to_string());
+    }
+    let pkg_names = ["yt-dlp", "requests", "youtube-transcript-api"];
+    let args: Vec<String> = vec![
+        "-m".to_string(),
+        "pip".to_string(),
+        "install".to_string(),
+        "--upgrade".to_string(),
+        pkg_names.iter().map(|s| s.to_string()).collect(),
+    ];
+    let out = Command::new(&py_exe)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("執行 pip 失敗: {}", e))?;
+    let status = out.status.code().unwrap_or(-1);
+    if status == 0 {
+        Ok(format!("已安裝：{}", missing.join("、")))
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Err(format!(
+            "pip 安裝失敗（{}）：{}",
+            status,
+            format!("{}{}", stdout, stderr).lines().take(5).collect::<Vec<_>>().join(" ")
+        ))
+    }
+}
+
 /// 写入日志（前端调用）
 #[command]
 fn write_log(message: String) -> Result<bool, String> {
@@ -578,6 +711,8 @@ fn main() {
             open_url,
             clear_cache,
             check_python_environment,
+            check_environment,
+            install_python_deps,
             write_log,
             read_binary_file,
             get_channel_videos,

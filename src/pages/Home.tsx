@@ -135,8 +135,14 @@ function SearchTab({
       </div>
 
       {error && (
-        <div className="px-3 py-2 rounded-lg bg-[#7f1d1d] border border-[#991b1b] text-[#fca5a5] text-sm">
-          {error}
+        <div className="px-3 py-2 rounded-lg bg-[#7f1d1d] border border-[#991b1b] text-[#fca5a5] text-sm space-y-1">
+          <div>{error}</div>
+          {/* Python 環境缺失時，導引到設定頁環境狀態 */}
+          {/Python|python/i.test(error) && (
+            <div className="text-xs text-[#fcd34d]">
+              請到「設定 → 環境狀態」確認 Python 與必要套件是否安裝；缺套件可一鍵安裝
+            </div>
+          )}
         </div>
       )}
 

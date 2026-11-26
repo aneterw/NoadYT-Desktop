@@ -17,6 +17,8 @@
         {"command": "detect_players"},
         {"command": "open_url"},
         {"command": "check_python_environment"},
+        {"command": "check_environment"},
+        {"command": "install_python_deps"},
         {"command": "clear_cache"},
         {"command": "write_log"},
         {"command": "read_binary_file"}

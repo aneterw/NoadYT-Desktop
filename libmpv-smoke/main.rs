@@ -117,10 +117,17 @@ fn main() {
     let mut sub_path: Option<String> = None;
     let mut user_agent: Option<String> = None;
     let mut youtube_id: Option<String> = None;
+    let mut fonts_dir: String = String::new();
     let mut wait_secs: u64 = 20;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "--fonts" => {
+                i += 1;
+                if i < args.len() {
+                    fonts_dir = args[i].clone();
+                }
+            }
             "--wait-seconds" => {
                 i += 1;
                 if i < args.len() {
@@ -189,13 +196,29 @@ fn main() {
 
     // ── 2. 建立 mpv 實例 ──
     let ua = user_agent.unwrap_or_else(|| "Mozilla/5.0".to_string());
-    let initial_json = format!(
-        "{{\"hwdec\":\"auto-safe\",\"force-window\":\"yes\",\"keep-open\":\"no\",\"user-agent\":\"{}\",\"referrer\":\"https://www.youtube.com\"}}",
-        json_escape(&ua)
-    );
+    let initial_json = if fonts_dir.is_empty() {
+        format!(
+            r#"{{"hwdec":"auto-safe","force-window":"yes","keep-open":"no","user-agent":"{}","referrer":"https://www.youtube.com"}}"#,
+            json_escape(&ua)
+        )
+    } else if fonts_dir == "FONTDIR" {
+        // 正確選項名：font-dir（fonts 是「列出」屬性，不是載入選項）
+        format!(
+            r#"{{"hwdec":"auto-safe","force-window":"yes","keep-open":"no","user-agent":"{}","referrer":"https://www.youtube.com","font-dir":"C:\\Windows\\Fonts"}}"#,
+            json_escape(&ua)
+        )
+    } else {
+        format!(
+            r#"{{"hwdec":"auto-safe","force-window":"yes","keep-open":"no","user-agent":"{}","referrer":"https://www.youtube.com","fonts":"{}"}}"#,
+            json_escape(&ua),
+            json_escape(&fonts_dir)
+        )
+    };
     let initial_bytes = c_str(&initial_json);
     let observed = c_str("{}");
-    println!("[2] 建立 mpv 實例（user-agent: {}...）...", ua.chars().take(40).collect::<String>());
+    let has_fonts = if fonts_dir.is_empty() { "無".to_string() } else { "有".to_string() };
+    println!("[2] 建立 mpv 實例（user-agent: {}..., fonts: {}）...", ua.chars().take(40).collect::<String>(), has_fonts);
+    let create_started = std::time::Instant::now();
     let handle = unsafe {
         create(
             initial_bytes.as_ptr(),
@@ -204,6 +227,7 @@ fn main() {
             std::ptr::null_mut(),
         )
     };
+    println!("    create 耗時 {} ms", create_started.elapsed().as_millis());
     if handle.is_null() {
         eprintln!("❌ mpv_wrapper_create 回傳 NULL");
         eprintln!("   可能原因：libmpv-2.dll 沒被一起載入（要與 wrapper 同目錄）、或 DLL 版本不符");
@@ -257,6 +281,137 @@ fn main() {
         run_cmd("sub-add", &sub_args);
         thread::sleep(Duration::from_secs(1));
     }
+
+    // ── 5c. 控制通道實測：比較 command('set') 與 set_property 兩種寫法 ──
+    let get_prop = |prop: &str, fmt: &str| -> String {
+        let c_name = c_str(prop);
+        let c_fmt = c_str(fmt);
+        let r = unsafe { get_property(handle, c_name.as_ptr(), c_fmt.as_ptr()) };
+        let s = take_cstr(free, r);
+        // 簡化顯示：{"data":"..."} 只留 content
+        s.trim().trim_start_matches('{').trim_end_matches('}')
+            .split_once(':')
+            .map(|(_, v)| v.trim().trim_matches('"').to_string())
+            .unwrap_or(s)
+    };
+    println!("[5c] 控制通道實測...");
+    thread::sleep(Duration::from_secs(2));
+
+    // 暫停（command set / set_property 兩條路都試）
+    let pause_before = get_prop("pause", "flag");
+    run_cmd("set", r#"["pause", true]"#);
+    thread::sleep(Duration::from_millis(500));
+    let pause_via_cmd = get_prop("pause", "flag");
+    run_set("pause", "false");
+    thread::sleep(Duration::from_millis(500));
+    let pause_via_setprop = get_prop("pause", "flag");
+    println!(
+        "    pause: before={} → cmd set=true→{} → set_property=false→{}",
+        pause_before, pause_via_cmd, pause_via_setprop
+    );
+
+    // 音量
+    run_cmd("set", r#"["volume", 40]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    volume: set 40 → 讀回 {}", get_prop("volume", "string"));
+
+    // 音訊延遲
+    run_cmd("set", r#"["audio-delay", 0.5]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    audio-delay: set 0.5 → 讀回 {}", get_prop("audio-delay", "string"));
+
+    // 剩餘時間（double 讀取是否可讀）
+    println!("    remaining: {}", get_prop("remaining", "double"));
+    println!("    time-pos: {}", get_prop("time-pos", "double"));
+
+    // 字幕屬性（大小/顏色/背景/開關）
+    run_cmd("set", r#"["sub-font-size", 30]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-font-size: set 30 → 讀回 {}", get_prop("sub-font-size", "string"));
+    run_cmd("set", r##"["sub-color", "#ff0000"]"##);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-color: set #ff0000 → 讀回 {}", get_prop("sub-color", "string"));
+    run_cmd("set", r##"["sub-back-color", "#00ff00"]"##);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-back-color: set #00ff00 → 讀回 {}", get_prop("sub-back-color", "string"));
+    // 8 位 hex 順序實測：AARRGGBB（alpha 前）vs RRGGBBAA（alpha 後），看讀回值判定
+    run_cmd("set", r##"["sub-back-color", "#99ff0000"]"##);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-back-color: set #99FF0000(AARRGGBB=綠60%透明) → 讀回 {}", get_prop("sub-back-color", "string"));
+    run_cmd("set", r##"["sub-use-embedded-styles", "no"]"##);
+    thread::sleep(Duration::from_millis(200));
+    println!("    sub-use-embedded-styles: set no → 讀回 {}", get_prop("sub-use-embedded-styles", "string"));
+    run_cmd("set", r##"["sub-back-color", "#99ff0000"]"##);
+    thread::sleep(Duration::from_millis(300));
+    println!("    重設 sub-back-color #99FF0000 → 讀回 {}", get_prop("sub-back-color", "string"));
+    run_cmd("set", r#"["sub", "no"]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub: set no → 讀回 {}", get_prop("sub", "flag"));
+    run_cmd("set", r#"["sub", "yes"]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub: set yes → 讀回 {}", get_prop("sub", "flag"));
+    println!("    sub-track: {}", get_prop("sub", "string"));
+    println!("    sid: {}", get_prop("sid", "string"));
+
+    // ── 5d. set_property 布林值 + 系統字體清單 ──
+    println!("[5d] set_property 布林值與字體...");
+    run_set("pause", "true");
+    thread::sleep(Duration::from_millis(300));
+    println!("    set_property pause=true → 讀回 {}", get_prop("pause", "flag"));
+    run_set("sub", "true");
+    thread::sleep(Duration::from_millis(300));
+    println!("    set_property sub=true → 讀回 {}", get_prop("sub", "flag"));
+    {
+        let c_name = c_str("fonts");
+        let c_fmt = c_str("node");
+        let r = unsafe { get_property(handle, c_name.as_ptr(), c_fmt.as_ptr()) };
+        let s = take_cstr(free, r);
+        let quotes = s.bytes().filter(|&b| b == b'"').count();
+        println!("    fonts(node) 長度={} 約 {} 支字型", s.len(), quotes / 2);
+    }
+
+    // ── 5f. sub-font 實測：指定字型後讀回 ──
+    println!("[5f] sub-font 實測（fonts=C:\\Windows\\Fonts）...");
+    run_cmd("set", r#"["sub-font", "Sans"]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-font: set Sans → 讀回 {}", get_prop("sub-font", "string"));
+    run_cmd("set", r##"["sub-font", "Microsoft JhengHei"]"##);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-font: set 'Microsoft JhengHei' → 讀回 {}", get_prop("sub-font", "string"));
+    run_cmd("set", r##"["sub-font", "DengXian"]"##);
+    thread::sleep(Duration::from_millis(300));
+    println!("    sub-font: set 'DengXian' → 讀回 {}", get_prop("sub-font", "string"));
+
+    // ── 5e. 字幕開關的各寫法實測 ──
+    println!("[5e] 字幕開關寫法實測...");
+    run_cmd("set", r#"["sub", 1]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    cmd sub=1(int) => 讀回 {}", get_prop("sub", "string"));
+    run_cmd("set", r#"["sub", 0]"#);
+    thread::sleep(Duration::from_millis(300));
+    println!("    cmd sub=0(int) => 讀回 {}", get_prop("sub", "string"));
+    run_cmd("sub-toggle", "[]");
+    thread::sleep(Duration::from_millis(300));
+    println!("    cmd sub-toggle => 讀回 {}", get_prop("sub", "string"));
+    run_set("sub", "1");
+    thread::sleep(Duration::from_millis(300));
+    println!("    set_property sub=1 => 讀回 {}", get_prop("sub", "string"));
+
+    // ── 5g. init 後才設 fonts（不擋初始化），驗證載入耗时與後續指令是否仍可動作 ──
+    println!("[5g] init 後設 fonts=C:\\Windows\\Fonts...");
+    let t0 = std::time::Instant::now();
+    run_set("fonts", r#""C:\Windows\Fonts""#);
+    println!("    set_property fonts 耗時 {} ms", t0.elapsed().as_millis());
+    thread::sleep(Duration::from_secs(1));
+    let c_fonts = c_str("fonts");
+    let c_node = c_str("node");
+    let r = unsafe { get_property(handle, c_fonts.as_ptr(), c_node.as_ptr()) };
+    let s = take_cstr(free, r);
+    let q = s.bytes().filter(|&b| b == b'"').count();
+    println!("    讀回 fonts(node) 約 {} 支字型", q / 2);
+    run_cmd("set", r#"["pause", true]"#);
+    println!("    後續指令 pause → 讀回 {}", get_prop("pause", "flag"));
+    run_set("pause", "false");
 
     // ── 6. 播放觀察 ──
     println!("[6] 播放 {wait_secs} 秒，統計 video-reconfig / audio-reconfig ...");
