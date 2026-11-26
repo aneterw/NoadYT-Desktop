@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
-import { init, destroy, command, setProperty, getProperty, observeProperties, listenEvents } from 'tauri-plugin-libmpv-api'
+import { init, destroy, command, setProperty, getProperty, observeProperties, listenEvents, setVideoMarginRatio } from 'tauri-plugin-libmpv-api'
 import { getStreamUrl, playVideoExternal } from '@/lib/api'
 import type { StreamResult } from '@/lib/types'
 import { t } from '@/lib/i18n'
@@ -38,9 +38,91 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   // 內建播放器狀態與診斷
   const [timePos, setTimePos] = useState(0)
   const [duration, setDuration] = useState(0)
+  const [remaining, setRemaining] = useState(0)
   const [videoVo, setVideoVo] = useState('')
   const [videoSeen, setVideoSeen] = useState(false)
+  const [videoReady, setVideoReady] = useState(false)
   const [diagLog, setDiagLog] = useState<string[]>([])
+  // 播放控制（與 mpv 實際狀態綁定）
+  const [isPaused, setIsPaused] = useState(false)
+  const [audioDelay, setAudioDelay] = useState(0) // ms
+  const [delayVisible, setDelayVisible] = useState(false)
+  const delayTimer = useRef<number | null>(null)
+  // 字幕控制
+  const [subOn, setSubOn] = useState(true)
+  const [subSize, setSubSize] = useState(18)
+  const [subFont, setSubFont] = useState('Sans')
+  const [subColor, setSubColor] = useState('#ffffff')
+  const [subBg, setSubBg] = useState('#000000')
+
+  /** 播放/暫停：用 command('set')（跟 seek 同一條已證實可動作的通道），
+   *  依「目前的 isPaused」翻轉，並立刻更新按鈕圖示；後面的輪詢會與 mpv 同步修正 */
+  const togglePause = useCallback(async () => {
+    try {
+      const wantPause = !isPaused
+      await command('set', ['pause', wantPause])
+      setIsPaused(wantPause)
+    } catch {
+      // 指令失敗：至少翻轉圖示，讓使用者知道有按到
+      setIsPaused(!isPaused)
+    }
+  }, [isPaused])
+
+  /** 音訊延遲調整（100ms 步進，範圍 ±3000ms），畫面上顯示 +Nms，4 秒無操作淡出 */
+  const adjustAudioDelay = useCallback((deltaMs: number) => {
+    setAudioDelay((prev) => {
+      const next = Math.max(-3000, Math.min(3000, prev + deltaMs))
+      void command('set', ['audio-delay', next / 1000]).catch(() => {})
+      return next
+    })
+    setDelayVisible(true)
+    if (delayTimer.current !== null) window.clearTimeout(delayTimer.current)
+    delayTimer.current = window.setTimeout(() => setDelayVisible(false), 4000)
+  }, [delayTimer])
+
+  /** 字幕 開/關 */
+  const toggleSub = useCallback(() => {
+    setSubOn((prev) => {
+      const next = !prev
+      void command('set', ['sub', next ? 'yes' : 'no']).catch(() => {})
+      return next
+    })
+  }, [])
+
+  /** 字幕大小 / 字型 / 顏色 / 背景 套用（mpv 字幕屬性） */
+  const applySubSize = (n: number) => {
+    setSubSize(n)
+    void command('set', ['sub-font-size', n]).catch(() => {})
+  }
+  const applySubFont = (f: string) => {
+    setSubFont(f)
+    void command('set', ['sub-font', f]).catch(() => {})
+  }
+  const applySubColor = (c: string) => {
+    setSubColor(c)
+    void command('set', ['sub-color', c]).catch(() => {})
+  }
+  const applySubBg = (c: string) => {
+    setSubBg(c)
+    void command('set', ['sub-back-color', c]).catch(() => {})
+  }
+
+  /** 每秒輪詢 mpv：pause 狀態 + 剩餘時間（比事件可靠，UI 常與 mpv 同步） */
+  useEffect(() => {
+    if (playerType !== 'internal' || !streamResult || internalFailed) return
+    const timer = window.setInterval(async () => {
+      if (!mpvInitialized.current) return
+      try {
+        const p = await getProperty('pause', 'flag')
+        if (typeof p === 'boolean') setIsPaused(p)
+        const r = await getProperty('remaining', 'double')
+        if (typeof r === 'number' && isFinite(r)) setRemaining(Math.max(0, r))
+      } catch {
+        // 讀不到不影響播放
+      }
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [playerType, streamResult, internalFailed])
 
   /** 內建播放器手動/自動備援：改用外部播放器（run19.py 邏輯，已被證實可播） */
   const launchExternal = useCallback(async () => {
@@ -48,9 +130,21 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
     setInternalFailed(true)
     setLoading(true)
     setError('')
-    // 釋放內建播放器實例（避免佔住程序）
-    void destroy().catch(() => {})
-    mpvInitialized.current = false
+    // 先停止內建播放器（stop 讓音訊立即停下），再釋放實例，
+    // 避免切換外部後內建音訊還在下播（雙音重疊）
+    if (mpvInitialized.current) {
+      try {
+        await command('stop')
+      } catch {
+        // 沒建立成功就算了
+      }
+      try {
+        await destroy()
+      } catch {
+        // destroy 失敗也繼續
+      }
+      mpvInitialized.current = false
+    }
     try {
       await playVideoExternal(videoId, externalPlayer, subtitleLanguage, maxResolution)
       setExternalLaunched(true)
@@ -106,24 +200,64 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   }, [loadStream])
 
   // 内建播放器模式：初始化 libmpv 并加载流
-  // 備援策略：mpv 真正出畫面的訊號是 video-reconfig 事件（smoke test 已驗證）；
-  // 12 秒內沒觸發、或 end-file reason=error（403/URL 過期）→ 自動改用外部播放器視窗
+  // 備援策略：以屬性輪詢判定影片是否真的在播（比事件可靠）；
+  // 30 秒內 video-format 仍為空 → 自動改用外部播放器視窗。
+  // 播放中途的暫存錯誤（end-file reason=error）不再強切外部，只提示。
   useEffect(() => {
     if (playerType === 'internal' && streamResult && playing && !mpvInitialized.current) {
       // 注意：不能在這個條件分支裡呼叫 hooks（useRef 等），會崩潰成白屏。
       // 用 effect 內的普通變數閉包保存 timer / unlisten / seen。
       let unlistenEvents: (() => void) | null = null
       let seenRef = false
+      let fileLoadedDone = false
       let fallbackTimer: number | null = null
+      let videoCheckTimer: number | null = null
 
+      const markVideoReady = () => {
+        seenRef = true
+        setVideoSeen(true)
+        setVideoReady(true)
+        if (fallbackTimer !== null) {
+          window.clearTimeout(fallbackTimer)
+          fallbackTimer = null
+        }
+      }
+
+      // 備援看門狗：30 秒內若 video-format 仍是空（沒解出影片）才切外部
       const startFallbackWatchdog = () => {
         if (fallbackTimer !== null) return
         fallbackTimer = window.setTimeout(() => {
-          if (!seenRef) {
-            // 內嵌顯示失敗（黑畫面）→ 自動切換外部播放器
-            void launchExternal()
+          if (!seenRef) void launchExternal()
+        }, 30000)
+      }
+
+      // 屬性輪詢：video-format 非空 = 影片已解碼；time-pos 前進 = 播放中
+      const startVideoPolling = () => {
+        if (videoCheckTimer !== null) return
+        let lastTime = -1
+        const tick = async () => {
+          if (seenRef) return
+          try {
+            const vf = await getProperty('video-format', 'string')
+            const fmt = vf == null ? '' : Array.isArray(vf) ? vf.join('|') : String(vf)
+            if (fmt && fmt !== 'null') {
+              markVideoReady()
+              return
+            }
+            const tp = await getProperty('time-pos', 'double')
+            const t = typeof tp === 'number' ? tp : 0
+            if (t > 0 && t !== lastTime) {
+              // 播放位置在推進，影片已在解碼
+              markVideoReady()
+              return
+            }
+            lastTime = t
+          } catch {
+            // 讀不到屬性不影響輪詢
           }
-        }, 12000)
+          videoCheckTimer = window.setTimeout(tick, 2000)
+        }
+        void tick()
       }
 
       const initMpv = async () => {
@@ -145,81 +279,104 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
           await init(mpvConfig)
           mpvInitialized.current = true
 
+          // 影片畫面縮到「標題列與控制列之間」，讓上下 UI 不被 mpv 嵌入視窗蓋住
+          // （比例依視窗高度：頂端約 5% 給 header、底端約 7% 給控制列）
+          try {
+            await setVideoMarginRatio({ top: 0.05, bottom: 0.07 })
+          } catch {
+            // 邊距設定失敗不影響播放
+          }
+
           await observeProperties(OBSERVED_PROPERTIES, ({ name, data }) => {
             if (name === 'pause') {
               setPlaying(data !== true)
             } else if (name === 'time-pos') {
-              setTimePos(typeof data === 'number' ? data : 0)
+              const t = typeof data === 'number' ? data : 0
+              setTimePos(t)
+              // time-pos 在推進 = 影片正在播，取消備援看門狗
+              if (t > 0 && !seenRef) markVideoReady()
             } else if (name === 'duration') {
               setDuration(typeof data === 'number' ? data : 0)
             }
           })
 
           // 診斷：mpv 目前用的影像輸出裝置（video-vo，例如 wid / d3d11 / ...）
-          const readVideoVo = async () => {
+          // 讀取失敗也記錄下來（之前被 catch 吞掉，所以一直顯示「未知」）
+          const readVideoVo = async (tag: string) => {
+            let desc = 'n/a'
             try {
               const v = await getProperty('video-vo', 'string')
-              if (typeof v === 'string' && v) setVideoVo(v)
-            } catch {
-              // 讀不到就算了
+              desc = v == null ? 'null' : Array.isArray(v) ? v.join('|') : String(v)
+              setVideoVo(desc || '（空值）')
+            } catch (e: unknown) {
+              const m = e instanceof Error ? e.message : String(e)
+              desc = `讀取失敗: ${m}`.slice(0, 80)
+              setVideoVo(desc)
             }
+            setDiagLog((prev) => [...prev.slice(-40), `[diag] ${tag} video-vo => ${desc}`])
           }
-          void readVideoVo()
-          setTimeout(() => { void readVideoVo() }, 3000)
-          setTimeout(() => { void readVideoVo() }, 8000)
+          void readVideoVo('t0')
+          setTimeout(() => { void readVideoVo('t3s') }, 3000)
+          setTimeout(() => { void readVideoVo('t8s') }, 8000)
 
           const audioUrl = streamResult.audioUrl ?? null
           const subs = streamResult.subtitles
 
-          // 事件監聽：audio/sub 掛載 + 出畫面偵測 + 播放失敗偵測 + mpv log 收集
+          // 事件監聽：audio/sub 掛載 + 出畫面偵測 + mpv log 收集。
+          // 注意：不要 unlisten 整組監聽，video-reconfig 等後續事件仍要收。
           const unlisten = await listenEvents((event) => {
             if (event.event === 'video-reconfig') {
               // 畫面真正出來了 → 取消備援看門狗
-              seenRef = true
-              setVideoSeen(true)
-              if (fallbackTimer !== null) {
-                window.clearTimeout(fallbackTimer)
-                fallbackTimer = null
-              }
+              markVideoReady()
             } else if (event.event === 'log-message') {
               // 收集 mpv 內部訊息作診斷證據（只留與影片輸出/錯誤相關的）
               const txt = String(event.text ?? '')
               if (/vo|vid|wid|window|video|error|403|fail/i.test(txt)) {
                 setDiagLog((prev) => [...prev.slice(-40), `[${event.level}] ${txt.slice(0, 160)}`])
               }
-            } else if (event.event === 'file-loaded') {
+            } else if (event.event === 'file-loaded' && !fileLoadedDone) {
+              fileLoadedDone = true
               void (async () => {
+                // 音訊/字幕掛載失敗「不是」播放失敗：只記到診斷，不彈「播放失敗」遮罩。
+                // 否則影片播完/無字幕時 sid 設不到，就會誤報「字幕/音訊掛載失敗」
                 try {
                   if (audioUrl) {
                     await command('audio-add', [audioUrl, 'select'])
                   }
+                } catch (audioErr: unknown) {
+                  const m = audioErr instanceof Error ? audioErr.message : String(audioErr)
+                  setDiagLog((prev) => [...prev.slice(-40), `[diag] audio-add 失敗: ${m}`.slice(0, 120)])
+                }
+                try {
                   for (const sub of subs) {
                     await command('sub-add', [sub.path])
                   }
                   if (subs.length > 0) {
-                    await setProperty('sid', 1)
+                    await setProperty('sid', 1).catch(() => {
+                      // sid 設不到（如無字幕軌）不影響播放，僅記錄
+                      setDiagLog((prev) => [...prev.slice(-40), '[diag] sid 設定略過（無可選字幕）'])
+                    })
                   }
                 } catch (subErr: unknown) {
                   const m = subErr instanceof Error ? subErr.message : String(subErr)
-                  setError(`字幕/音訊掛載失敗：${m}`)
-                } finally {
-                  unlisten()
-                  unlistenEvents = null
+                  setDiagLog((prev) => [...prev.slice(-40), `[diag] sub-add 失敗: ${m}`.slice(0, 120)])
                 }
               })()
             } else if (event.event === 'end-file' && event.reason === 'error') {
-              // 串流播放失敗（403、URL 過期等）→ 自動切換外部播放器備援
-              if (fallbackTimer !== null) {
-                window.clearTimeout(fallbackTimer)
-                fallbackTimer = null
+              // 暫存錯誤（HLS chunk 403、斷流等）不再強切外部：
+              // 影片沒起來才切，起來了只提示、讓 mpv 自己重試
+              if (!seenRef) {
+                void launchExternal()
+              } else {
+                setError('串流中斷，嘗試重新播放中...')
               }
-              void launchExternal()
             }
           })
           unlistenEvents = unlisten
 
           await command('loadfile', [streamResult.path, 'replace'])
           startFallbackWatchdog()
+          startVideoPolling()
           setLoading(false)
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err)
@@ -233,6 +390,7 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
         unlistenEvents?.()
         unlistenEvents = null
         if (fallbackTimer !== null) window.clearTimeout(fallbackTimer)
+        if (videoCheckTimer !== null) window.clearTimeout(videoCheckTimer)
         void destroy().catch(() => {})
         mpvInitialized.current = false
       }
@@ -274,7 +432,7 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   // 備援中 / 已切換：由下方 internalFailed 區塊顯示狀態，並保留返回按鈕
 
   return (
-    <div className="min-h-screen bg-[#09090b] flex flex-col">
+    <div className="min-h-screen bg-transparent flex flex-col">
       <header className="border-b border-[#27272a] bg-[#09090b]/80 backdrop-blur px-6 py-3 flex items-center justify-between z-10">
         <button
           onClick={onBack}
@@ -300,19 +458,20 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
         </div>
       </header>
 
-      {/* 控制列：播放/暫停 + 進度 + 診斷資訊（libmpv 是裸核心，控制 UI 需自建） */}
+      {/* 控制列：播放/暫停 + 進度 + 剩餘 + 音訊延遲 + 字幕 + 診斷（libmpv 裸核心，控制 UI 自建） */}
       {!internalFailed && (
         <div className="flex items-center gap-3 px-4 py-2 bg-[#18181b] border-b border-[#27272a]">
           <button
-            onClick={() => { void command('set', ['pause', !playing]).catch(() => {}) }}
-            disabled={!playing && !timePos}
+            onClick={() => { void togglePause() }}
+            disabled={!timePos && !videoReady}
             className="w-8 h-8 rounded-full bg-[#a855f7] hover:bg-[#9333ea] disabled:opacity-40 text-white flex items-center justify-center transition-colors"
-            aria-label={playing ? 'pause' : 'play'}
+            aria-label={isPaused ? 'play' : 'pause'}
+            title={isPaused ? '播放' : '暫停'}
           >
-            {playing ? (
-              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z" /></svg>
-            ) : (
+            {isPaused ? (
               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+            ) : (
+              <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z" /></svg>
             )}
           </button>
           <span className="text-xs tabular-nums text-[#a1a1aa] w-11 text-right">{fmtTime(timePos)}</span>
@@ -327,6 +486,82 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
             aria-label="seek"
           />
           <span className="text-xs tabular-nums text-[#a1a1aa] w-11">{fmtTime(duration || null)}</span>
+          {/* 剩餘時間（直播常無總長，remaining 才有意義） */}
+          <span className="text-xs tabular-nums text-[#a1a1aa] whitespace-nowrap">
+            {t('remaining', language as any)} {fmtTime(remaining)}
+          </span>
+          {/* 音訊延遲：±100ms，畫面浮顯示 +Nms，4 秒無操作淡出 */}
+          <div className="flex items-center gap-1" title={t('audioDelay', language as any)}>
+            <button
+              onClick={() => { adjustAudioDelay(-100) }}
+              className="w-7 h-7 rounded bg-[#27272a] border border-[#3f3f46] text-white text-xs flex items-center justify-center hover:bg-[#3f3f46] transition-colors"
+              aria-label="audio delay minus"
+            >
+              −
+            </button>
+            <button
+              onClick={() => { adjustAudioDelay(100) }}
+              className="w-7 h-7 rounded bg-[#27272a] border border-[#3f3f46] text-white text-xs flex items-center justify-center hover:bg-[#3f3f46] transition-colors"
+              aria-label="audio delay plus"
+            >
+              +
+            </button>
+          </div>
+          {/* 字幕 開/關 + 設定（大小/顏色/背景） */}
+          <button
+            onClick={toggleSub}
+            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+              subOn
+                ? 'bg-[#a855f7] text-white'
+                : 'bg-[#27272a] border border-[#3f3f46] text-[#a1a1aa] hover:bg-[#3f3f46]'
+            }`}
+            title={t('subSettings', language as any)}
+          >
+            {subOn ? t('subOn', language as any) : t('subOff', language as any)}
+          </button>
+          <div className="flex items-center gap-1.5">
+            <label className="text-[11px] text-[#a1a1aa]">{t('subFont', language as any)}</label>
+            <select
+              value={subFont}
+              onChange={(e) => applySubFont(e.target.value)}
+              className="px-1.5 py-0.5 rounded bg-[#27272a] border border-[#3f3f46] text-white text-[11px] max-w-[110px]"
+              aria-label="sub font"
+            >
+              <option value="Sans">Sans</option>
+              <option value="Microsoft JhengHei">微軟正黑體</option>
+              <option value="Microsoft YaHei">微軟雅黑</option>
+              <option value="PMingLiU">新細明體</option>
+              <option value="DengXian">等距線體</option>
+              <option value="Arial">Arial</option>
+              <option value="SimSun">宋體</option>
+            </select>
+            <label className="text-[11px] text-[#a1a1aa]">{t('subSize', language as any)}</label>
+            <input
+              type="number"
+              min={8}
+              max={72}
+              value={subSize}
+              onChange={(e) => applySubSize(parseInt(e.target.value, 10) || 18)}
+              className="w-12 px-1.5 py-0.5 rounded bg-[#27272a] border border-[#3f3f46] text-white text-[11px]"
+              aria-label="sub size"
+            />
+            <label className="text-[11px] text-[#a1a1aa]">{t('subColor', language as any)}</label>
+            <input
+              type="color"
+              value={subColor}
+              onChange={(e) => applySubColor(e.target.value)}
+              className="w-6 h-6 p-0.5 rounded bg-[#27272a] border border-[#3f3f46] cursor-pointer"
+              aria-label="sub color"
+            />
+            <label className="text-[11px] text-[#a1a1aa]">{t('subBackground', language as any)}</label>
+            <input
+              type="color"
+              value={subBg}
+              onChange={(e) => applySubBg(e.target.value)}
+              className="w-6 h-6 p-0.5 rounded bg-[#27272a] border border-[#3f3f46] cursor-pointer"
+              aria-label="sub background"
+            />
+          </div>
           {/* 診斷：mpv 影像輸出裝置 + 最近 log */}
           <details className="ml-2 text-xs">
             <summary className="cursor-pointer text-[#71717a] hover:text-[#a855f7] select-none">診斷</summary>
@@ -346,6 +581,13 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
         </div>
       )}
 
+      {/* 音訊延遲浮動顯示（畫面中顯示目前 +Nms，按鍵後 4 秒淡出） */}
+      {delayVisible && !internalFailed && (
+        <div className="absolute top-14 right-6 z-30 px-3 py-1.5 rounded-lg bg-[#09090b]/85 backdrop-blur border border-[#27272a] text-sm text-[#fcd34d] font-mono transition-opacity">
+          {t('audioDelay', language as any)} {audioDelay >= 0 ? '+' : ''}{audioDelay}ms
+        </div>
+      )}
+
       {error && !playing && !internalFailed && (
         <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 bg-[#09090b]/90 backdrop-blur z-20">
           <div className="px-4 py-3 rounded-lg bg-[#7f1d1d] border border-[#991b1b] text-[#fca5a5] text-sm mb-3">
@@ -360,10 +602,14 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
         </div>
       )}
 
-      <div className="flex-1 relative bg-black">
-        <div ref={videoRef} className="absolute inset-0 w-full h-full bg-black" />
-        {loading && playing && !error && !internalFailed && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center bg-black/80">
+      <div className="flex-1 relative">
+        {/* 影片就緒前：深色底（避免整頁全透明看穿到桌面）；就緒後移除，讓 mpv 從透明像素透出來 */}
+        {!videoReady && !internalFailed && (
+          <div className="absolute inset-0 bg-[#09090b]" />
+        )}
+        <div ref={videoRef} className="absolute inset-0 w-full h-full" />
+        {loading && playing && !error && !internalFailed && !videoReady && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
             <div className="w-8 h-8 rounded-full border-4 border-[#a855f7] border-t-transparent rounded-full spin mb-3" />
             <span className="text-[#a1a1aa] text-sm">{t('loadingStream', language as any)}</span>
           </div>

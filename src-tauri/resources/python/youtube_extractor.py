@@ -978,7 +978,7 @@ def resolve_player(preferred: str, is_live: bool = False) -> tuple[str | None, s
 def download_subtitles_tempdir(video_id: str, target_languages: list[str], sub_dir: str) -> str | None:
     """字幕下載至指定目錄，供 MPV/VLC 讀取"""
     if not target_languages:
-        print('[Subtitle] Language list is empty, skipping subtitle download.')
+        print('[Subtitle] Language list is empty, skipping subtitle download.', file=sys.stderr)
         return None
 
     ytt_api = YouTubeTranscriptApi()
@@ -988,26 +988,26 @@ def download_subtitles_tempdir(video_id: str, target_languages: list[str], sub_d
 
     try:
         t_list = ytt_api.list(video_id)
-        print(f'=== Available subtitles for {video_id} ===')
+        print(f'=== Available subtitles for {video_id} ===', file=sys.stderr)
         avail = []
         for t in t_list:
             tag = 'Manual' if not t.is_generated else 'ASR'
-            print(f'- {t.language} ({t.language_code}) -> [{tag}]')
+            print(f'- {t.language} ({t.language_code}) -> [{tag}]', file=sys.stderr)
             avail.append(t.language_code)
 
         if not avail:
-            print('No subtitles available.')
+            print('No subtitles available.', file=sys.stderr)
             return None
 
         search = [lang for lang in target_languages if lang in avail]
         if not search:
             search = [next(iter(avail))]
-            print(f'Fallback language: {search}')
+            print(f'Fallback language: {search}', file=sys.stderr)
 
         transcript = t_list.find_transcript(search)
         code = transcript.language_code
         src = 'manual' if not transcript.is_generated else 'auto'
-        print(f'Selected subtitle: {transcript.language} ({code}) [{src}]')
+        print(f'Selected subtitle: {transcript.language} ({code}) [{src}]', file=sys.stderr)
 
         # YTA
         try:
@@ -1018,9 +1018,9 @@ def download_subtitles_tempdir(video_id: str, target_languages: list[str], sub_d
                 with open(f_yta, 'w', encoding='utf-8') as f:
                     f.write(vtt_text)
                 yta_file = f_yta
-                print(f'[OK 1/2] Saved YTA VTT: {f_yta}')
+                print(f'[OK 1/2] Saved YTA VTT: {f_yta}', file=sys.stderr)
         except Exception as e:
-            print(f'[Fail 1/2] YTA VTT error: {e}')
+            print(f'[Fail 1/2] YTA VTT error: {e}', file=sys.stderr)
 
         # TimedText
         try:
@@ -1031,27 +1031,27 @@ def download_subtitles_tempdir(video_id: str, target_languages: list[str], sub_d
                 with open(f_nat, 'w', encoding='utf-8') as f:
                     f.write(res.text)
                 native_file = f_nat
-                print(f'[OK 2/2] Saved native VTT: {f_nat}')
+                print(f'[OK 2/2] Saved native VTT: {f_nat}', file=sys.stderr)
         except Exception as e:
-            print(f'[Fail 2/2] Native VTT error: {e}')
+            print(f'[Fail 2/2] Native VTT error: {e}', file=sys.stderr)
 
     except TranscriptsDisabled:
-        print(f'Subtitles disabled for {video_id}.')
+        print(f'Subtitles disabled for {video_id}.', file=sys.stderr)
     except VideoUnavailable:
-        print(f'Video {video_id} unavailable.')
+        print(f'Video {video_id} unavailable.', file=sys.stderr)
     except NoTranscriptFound:
-        print(f'No transcript found for {target_languages}.')
+        print(f'No transcript found for {target_languages}.', file=sys.stderr)
     except Exception as e:
-        print(f'Subtitle error: {e}')
+        print(f'Subtitle error: {e}', file=sys.stderr)
 
     if native_file and os.path.exists(native_file):
-        print(f'[Subtitle] Using native: {native_file}')
+        print(f'[Subtitle] Using native: {native_file}', file=sys.stderr)
         return native_file
     if yta_file and os.path.exists(yta_file):
-        print(f'[Subtitle] Using YTA: {yta_file}')
+        print(f'[Subtitle] Using YTA: {yta_file}', file=sys.stderr)
         return yta_file
 
-    print('[Subtitle] Playing without subtitles.')
+    print('[Subtitle] Playing without subtitles.', file=sys.stderr)
     return None
 
 
@@ -1158,6 +1158,88 @@ def play_video(video_id: str, player_pref: str, subtitle_lang: str, max_resoluti
 # ═════════════════════════════════════════════════════════════════
 # Windows Sidecar CLI entry (Tauri Rust 呼叫此腳本，讀取 stdout JSON)
 # ═════════════════════════════════════════════════════════════════
+def get_stream_urls(video_id: str, subtitle_lang: str, max_resolution: str = 'auto') -> str:
+    """run19.py 同源的串流來源：給 Tauri 內建 libmpv 用。
+
+    與外部播放器 play_video 取 URL 的方式完全一致（同一支 yt-dlp、
+    同一套 build_format_str 選軌），確保內建/外部品質一致：
+    - 直播：mpv 格式字串（LIVE_PREFER_30FPS → 30fps AVC 優先）
+    - 一般：bestvideo+bestaudio/best/best（依 max_res 限制）
+    - 音訊軌：abr/tbr 取最高（不挑第一條）
+    - 字幕：subtitle_lang='none' 時不載入，與 play_video 同邏輯
+
+    回傳 JSON: {ok, video_url, audio_url, user_agent, is_live, title,
+               subtitles:[{language,name,path}]}
+    """
+    import tempfile
+
+    url = build_youtube_url(video_id)
+    if subtitle_lang in ('none', ''):
+        target_langs: list[str] = []
+    elif subtitle_lang == 'auto':
+        target_langs = ['zh-TW', 'zh-Hant', 'zh-Hans', 'zh', 'en', 'ja']
+    else:
+        target_langs = [subtitle_lang]
+
+    try:
+        opts = {'format': 'bestvideo+bestaudio/best', 'quiet': True, 'no_warnings': True,
+                'js_runtimes': {'node': {}}, 'remote_components': 'ejs:github'}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            meta = ydl.extract_info(url, download=False)
+
+        is_live = bool(meta.get('is_live'))
+        title = meta.get('title', 'Unknown Title')
+        parsed_res = parse_max_resolution(max_resolution)
+
+        # 與 play_video 完全相同的 format 字串（直播用 mpv 邏輯）
+        fmt = build_format_str(is_live, 'mpv', parsed_res)
+        ydl_opts = {'format': fmt, 'quiet': True, 'no_warnings': True,
+                    'js_runtimes': {'node': {}}, 'remote_components': 'ejs:github'}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        requested = info.get('requested_formats')
+        user_agent = ''
+        if requested and len(requested) >= 2:
+            # format 字串 'bestvideo+bestaudio'：requested[0]=影像軌、requested[1]=音訊軌（與 run19.py 相同取法）
+            # 注意：不能用 max(abr/tbr) 挑音訊軌 — 影像軌的 tbr 遠大於音訊，會把影像 URL 誤當音訊
+            v_url = requested[0].get('url', '')
+            a_url = requested[1].get('url', '')
+            headers = requested[0].get('http_headers') or {}
+            user_agent = headers.get('User-Agent') or headers.get('user-agent') or ''
+        else:
+            v_url = info.get('url', '')
+            a_url = ''
+            headers = info.get('http_headers') or {}
+            user_agent = headers.get('User-Agent') or headers.get('user-agent') or ''
+
+        # 字幕：與 play_video 相同的下載目錄與語言邏輯
+        subs: list[Dict[str, str]] = []
+        if not is_live and target_langs:
+            sub_dir = os.path.join(tempfile.gettempdir(), 'NoadYT-Desktop', 'subtitles')
+            os.makedirs(sub_dir, exist_ok=True)
+            sub_path = download_subtitles_tempdir(video_id, target_langs, sub_dir)
+            if sub_path:
+                # 檔名格式：{video_id}_{code}_{src}_{yta|timedtext}.vtt
+                base = os.path.basename(sub_path)
+                parts = base.split('_')
+                code = parts[1] if len(parts) > 1 else 'unknown'
+                subs.append({'language': code, 'name': code, 'path': sub_path})
+
+        return json.dumps({
+            'ok': True,
+            'video_url': v_url,
+            'audio_url': a_url,
+            'user_agent': user_agent or 'Mozilla/5.0',
+            'is_live': is_live,
+            'title': title,
+            'subtitles': subs,
+        }, ensure_ascii=False)
+
+    except Exception as e:
+        return json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     import sys
     import json
@@ -1182,6 +1264,11 @@ if __name__ == "__main__":
         elif cmd == "--info" and len(sys.argv) >= 3:
             pref = sys.argv[3] if len(sys.argv) >= 4 else "none"
             _emit(json.loads(get_video_info(sys.argv[2], pref)))
+        elif cmd == "--stream" and len(sys.argv) >= 3:
+            video_id = sys.argv[2]
+            lang = sys.argv[3] if len(sys.argv) >= 4 else "auto"
+            max_res = sys.argv[4] if len(sys.argv) >= 5 else "auto"
+            _emit(json.loads(get_stream_urls(video_id, lang, max_res)))
         elif cmd == "--play" and len(sys.argv) >= 4:
             video_id = sys.argv[2]
             player_pref = sys.argv[3]

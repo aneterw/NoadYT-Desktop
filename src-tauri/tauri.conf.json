@@ -1,6 +1,6 @@
 {
   "productName": "NoadYT-Desktop",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "identifier": "com.noadyt.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -17,7 +17,7 @@
         "resizable": true,
         "fullscreen": false,
         "maximizable": true,
-        "transparent": false
+        "transparent": true
       }
     ],
     "security": {

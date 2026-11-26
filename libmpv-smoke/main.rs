@@ -114,6 +114,8 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let mut video_url: Option<String> = None;
     let mut audio_url: Option<String> = None;
+    let mut sub_path: Option<String> = None;
+    let mut user_agent: Option<String> = None;
     let mut youtube_id: Option<String> = None;
     let mut wait_secs: u64 = 20;
     let mut i = 1;
@@ -123,6 +125,18 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     wait_secs = args[i].parse().unwrap_or(20);
+                }
+            }
+            "--user-agent" => {
+                i += 1;
+                if i < args.len() {
+                    user_agent = Some(args[i].clone());
+                }
+            }
+            "--sub" => {
+                i += 1;
+                if i < args.len() {
+                    sub_path = Some(args[i].clone());
                 }
             }
             "youtube" => {
@@ -145,7 +159,7 @@ fn main() {
         println!("ℹ️ YouTube 模式：mpv 需內含 ytdl-lua 才能解析正式網址\n");
     }
     let Some(video_url) = video_url else {
-        eprintln!("用法: libmpv-smoke <video_url> [audio_url] [--wait-seconds N]\n      libmpv-smoke youtube <video_id>");
+        eprintln!("用法: libmpv-smoke <video_url> [audio_url] [--user-agent UA] [--wait-seconds N]\n      libmpv-smoke youtube <video_id>");
         std::process::exit(2);
     };
     let audio_url = audio_url.unwrap_or_default();
@@ -174,11 +188,14 @@ fn main() {
         unsafe { *lib.get(b"mpv_wrapper_get_property\0").expect("缺少 get_property") };
 
     // ── 2. 建立 mpv 實例 ──
-    let initial_bytes = c_str(
-        r#"{"hwdec":"auto-safe","force-window":"yes","keep-open":"no","user-agent":"Mozilla/5.0","referrer":"https://www.youtube.com"}"#,
+    let ua = user_agent.unwrap_or_else(|| "Mozilla/5.0".to_string());
+    let initial_json = format!(
+        "{{\"hwdec\":\"auto-safe\",\"force-window\":\"yes\",\"keep-open\":\"no\",\"user-agent\":\"{}\",\"referrer\":\"https://www.youtube.com\"}}",
+        json_escape(&ua)
     );
+    let initial_bytes = c_str(&initial_json);
     let observed = c_str("{}");
-    println!("[2] 建立 mpv 實例...");
+    println!("[2] 建立 mpv 實例（user-agent: {}...）...", ua.chars().take(40).collect::<String>());
     let handle = unsafe {
         create(
             initial_bytes.as_ptr(),
@@ -233,6 +250,14 @@ fn main() {
         run_cmd("audio-add", &audio_add_args);
     }
 
+    // ── 5b. 字幕：sub-add 本地 vtt ──
+    if let Some(sub) = &sub_path {
+        let sub_args = format!("[\"{}\", \"select\"]", json_escape(sub));
+        println!("[5b] sub-add（select）...");
+        run_cmd("sub-add", &sub_args);
+        thread::sleep(Duration::from_secs(1));
+    }
+
     // ── 6. 播放觀察 ──
     println!("[6] 播放 {wait_secs} 秒，統計 video-reconfig / audio-reconfig ...");
     thread::sleep(Duration::from_secs(wait_secs));
@@ -240,7 +265,7 @@ fn main() {
     let n_video = VIDEO_RECONFIG.load(Ordering::SeqCst);
     let n_audio = AUDIO_RECONFIG.load(Ordering::SeqCst);
 
-    for prop in ["video-format", "audio-format", "pause"] {
+    for prop in ["video-format", "audio-format", "sub", "sid", "pause"] {
         let c_name = c_str(prop);
         let c_fmt = c_str("string");
         let r = unsafe { get_property(handle, c_name.as_ptr(), c_fmt.as_ptr()) };

@@ -63,18 +63,6 @@ struct StreamResult {
     user_agent: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StreamInfo {
-    best_combined: Option<(u64, String)>,
-    best_dash_video: Option<(u64, String)>,
-    best_dash_audio: Option<(u64, String)>,
-    manifest_url: Option<String>,
-    subtitles: Vec<SubtitleTrack>,
-    /// 串流 URL 所需的 User-Agent（取自 formats[].http_headers，YouTube 防 403）
-    user_agent: Option<String>,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SubtitleTrack {
@@ -96,213 +84,59 @@ struct GetStreamUrlInput {
 fn get_stream_url(input: GetStreamUrlInput) -> Result<StreamResult, String> {
     dlog!("[DEBUG get_stream_url] START video_id={} resolution={:?} player_type={:?}", input.video_id, input.resolution, input.player_type);
 
-    // 解析 resolution：auto = 不設上限（取最高品質）
-    let max_h = match input.resolution.as_deref() {
-        None | Some("auto") => u64::MAX,
-        Some(h) => h.parse::<u64>().unwrap_or(u64::MAX),
-    };
-
-    // 判断是否为外部播放器模式
-    let is_external = input.player_type.as_deref() == Some("external");
-
-    // 步骤 1：決定 subtitle_mode（Python 端用來控制字幕語言偏好）
+    // 字幕語言（'none' = 不要字幕，Python 端不下載）
     let subtitle_mode = input.subtitle_lang.as_deref().unwrap_or("auto");
+    // 解析度上限字串（auto / 1080 / 720 / 480 / 360）
+    let res_arg = input.resolution.as_deref().unwrap_or("auto");
 
-    // === 步驟 2：獲取串流資訊（純串流，不做 download） ===
-    let stream_info = try_stream_url_full(&input.video_id, subtitle_mode, max_h)
-        .map_err(|e| format!("無法取得串流: {}", e))?;
+    // run19.py 同源取串流：Python 端用與外部播放器完全相同的 yt-dlp format 字串
+    // （直播 LIVE_PREFER_30FPS、一般 bestvideo+bestaudio），回傳影像 URL + 音訊 URL + UA + 字幕
+    let json_str = run_extractor(&["--stream", &input.video_id, subtitle_mode, res_arg])
+        .map_err(|e| format!("取得串流失敗: {}", e))?;
+    dlog!("[DEBUG get_stream_url] --stream OK, json_len={}", json_str.len());
 
-    // === 步驟 3：根據播放器類型選擇最佳軌跡（純串流，無 download fallback） ===
-    if is_external {
-        // 外部播放器：直接傳遞串流 URL（視訊 + 音訊），讓播放器自己處理合併
-        // 優先 DASH video（高解析度）+ DASH audio，次选 Combined
-        if let Some((v_h, v_url)) = &stream_info.best_dash_video {
-            if let Some((a_h, a_url)) = &stream_info.best_dash_audio {
-                // 直接傳遞兩個 URL 給外部播放器，不下載音頻到本地
-                dlog!("[DEBUG get_stream_url] External: SELECTED DASH video={}p + audio={}p", v_h, a_h);
-                return Ok(StreamResult {
-                    path: v_url.clone(),
-                    audio_url: Some(a_url.clone()),
-                    subtitles: stream_info.subtitles.clone(),
-                    user_agent: stream_info.user_agent.clone(),
-                });
-            }
-        }
-        // 沒有 DASH 分離軌跡，尝试 Combined（單一文件）
-        if let Some((h, url)) = &stream_info.best_combined {
-            dlog!("[DEBUG get_stream_url] External: SELECTED COMBINED h={}p", h);
-            return Ok(StreamResult {
-                path: url.clone(),
-                audio_url: None,
-                subtitles: stream_info.subtitles.clone(),
-                user_agent: stream_info.user_agent.clone(),
-            });
-        }
-        Err(format!(
-            "沒有可用的串流軌道（解析度上限 {}），請換一台影片或提高解析度上限",
-            input.resolution.as_deref().unwrap_or("auto")
-        ))
-    } else {
-        // 内部播放器：DASH video + audio 優先（可選高畫質），其次 Combined
-        if let Some((v_h, v_url)) = &stream_info.best_dash_video {
-            if let Some((a_h, a_url)) = &stream_info.best_dash_audio {
-                dlog!("[DEBUG get_stream_url] Internal: SELECTED DASH video={}p + audio={}p", v_h, a_h);
-                return Ok(StreamResult {
-                    path: v_url.clone(),
-                    audio_url: Some(a_url.clone()),
-                    subtitles: stream_info.subtitles.clone(),
-                    user_agent: stream_info.user_agent.clone(),
-                });
-            }
-        }
-        if let Some((h, url)) = &stream_info.best_combined {
-            dlog!("[DEBUG get_stream_url] Internal: SELECTED COMBINED h={}p", h);
-            return Ok(StreamResult {
-                path: url.clone(),
-                audio_url: None,
-                subtitles: stream_info.subtitles.clone(),
-                user_agent: stream_info.user_agent.clone(),
-            });
-        }
-        Err(format!(
-            "沒有可用的串流軌道（解析度上限 {}），請換一台影片或提高解析度上限",
-            input.resolution.as_deref().unwrap_or("auto")
-        ))
+    let parsed: serde_json::Value = extract_json_from_stdout(&json_str)
+        .ok_or("no JSON in stream response")?;
+    if parsed.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(parsed.get("error").and_then(|v| v.as_str())
+            .map(|s| format!("串流來源失敗: {}", s))
+            .unwrap_or_else(|| "串流來源回傳錯誤".to_string()));
     }
-}
 
-/// 步骤 2：串流分析（参考 NoadYTTV 的 getBestPlaybackInfo 逻辑）
-/// 收集所有軌跡：Combined、DASH-video、DASH-audio、manifest（依 max_h 過濾）
-fn try_stream_url_full(video_id: &str, subtitle_mode: &str, max_h: u64) -> Result<StreamInfo, String> {
-    dlog!("[DEBUG try_stream_url_full] START video_id={}", video_id);
-    let json = run_extractor(&["--info", video_id, subtitle_mode])?;
-    dlog!("[DEBUG try_stream_url_full] run_extractor OK, json_len={}", json.len());
+    let video_url = parsed.get("video_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let audio_url = parsed.get("audio_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let user_agent = parsed.get("user_agent").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let is_live = parsed.get("is_live").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let info = match extract_json_from_stdout(&json) {
-        Some(v) => v,
-        None => return Err("no JSON in stream response".to_string()),
-    };
+    if video_url.is_empty() {
+        return Err("串流來源未回傳影像 URL".to_string());
+    }
 
-    let formats = info.get("formats").and_then(|v| v.as_array()).ok_or("no formats array")?;
-    dlog!("[DEBUG try_stream_url_full] total formats: {}", formats.len());
-
-    // 字幕軌跡
+    // 字幕軌（本地 vtt 路徑）
     let mut subtitles: Vec<SubtitleTrack> = Vec::new();
-    if let Some(subs_arr) = info.get("subtitles").and_then(|v| v.as_array()) {
+    if let Some(subs_arr) = parsed.get("subtitles").and_then(|v| v.as_array()) {
         for sub in subs_arr {
             let language = sub.get("language").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let name = sub.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let sub_path = sub.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            // 轉換為 Windows 本地路徑（外部播放器需要本地路徑，不是 file:/// URL）
-            let sub_path = sub_path.strip_prefix("file:///").unwrap_or(&sub_path).to_string().replace('/', "\\");
-            if !sub_path.is_empty() {
-                dlog!("[DEBUG try_stream_url_full] Found subtitle: {} - {}", language, sub_path);
-                subtitles.push(SubtitleTrack { language, name, path: sub_path });
-            }
-        }
-    }
-    dlog!("[DEBUG try_stream_url_full] Total subtitle tracks: {}", subtitles.len());
-
-    // 收集所有軌跡
-    let mut best_combined: Option<(u64, String)> = None;      // 有聲有影（Combined）
-    let mut best_dash_video: Option<(u64, String)> = None;   // 純視訊（DASH）
-    let mut best_dash_audio: Option<(u64, String)> = None;   // 純音頻（DASH）
-    let mut manifest_url: Option<String> = None;
-    let mut user_agent: Option<String> = None;                // 串流 URL 所需的 User-Agent（YouTube 防 403）
-
-    for f in formats.iter() {
-        let vcodec = f.get("vcodec").and_then(|v| v.as_str()).unwrap_or("");
-        let acodec = f.get("acodec").and_then(|v| v.as_str()).unwrap_or("");
-        let url = f.get("url").and_then(|v| v.as_str()).unwrap_or("");
-        let m_url = f.get("manifest_url").and_then(|v| v.as_str()).unwrap_or("");
-        let height = f.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
-
-        if url.is_empty() && m_url.is_empty() { continue; }
-
-        // 解析度上限：含影片的軌道（combined / dash video / manifest）不超過 max_h
-        // 純音訊軌（vcodec=none）不受高度限制
-        let has_video = !vcodec.is_empty() && vcodec != "none";
-        if has_video && height > 0 && height > max_h { continue; }
-
-        // 從 formats[].http_headers 抓 User-Agent（YouTube DASH 串流必備，缺失會 403 黑屏）
-        if user_agent.is_none() {
-            if let Some(h) = f.get("http_headers") {
-                let ua = h.get("User-Agent")
-                    .or_else(|| h.get("user-agent"))
-                    .and_then(|v| v.as_str());
-                if let Some(ua) = ua {
-                    if !ua.is_empty() {
-                        user_agent = Some(ua.to_string());
-                        dlog!("[DEBUG try_stream_url] User-Agent captured: {} (len={})", ua, ua.len());
-                    }
-                }
-            }
-        }
-
-        // 記錄 manifest URL
-        if !m_url.is_empty() && manifest_url.is_none() {
-            manifest_url = Some(m_url.to_string());
-        }
-
-        // 收集 Combined（真正有聲有影）軌道 — vcodec 與 acodec 必須同時存在
-        // 純音訊軌（vcodec=none）不視為 combined，否則內建播放器會拿到無畫面的 URL 導致黑屏
-        if !url.is_empty()
-            && !vcodec.is_empty()
-            && vcodec != "none"
-            && !acodec.is_empty()
-            && acodec != "none"
-        {
-            if let Some((cur_h, _)) = best_combined {
-                if height > cur_h {
-                    best_combined = Some((height, url.to_string()));
-                    dlog!("[DEBUG try_stream_url] >>> NEW BEST COMBINED: h={} vc={} ac={}", height, vcodec, acodec);
-                }
-            } else {
-                best_combined = Some((height, url.to_string()));
-                dlog!("[DEBUG try_stream_url] First COMBINED track found: h={} vc={} ac={}", height, vcodec, acodec);
-            }
-        }
-
-        // 收集 DASH-video（純視訊）軌道
-        if !url.is_empty() && (acodec.is_empty() || acodec == "none") {
-            if let Some((cur_h, _)) = best_dash_video {
-                if height > cur_h {
-                    best_dash_video = Some((height, url.to_string()));
-                    dlog!("[DEBUG try_stream_url] >>> NEW BEST DASH-video: h={} vc={}", height, vcodec);
-                }
-            } else {
-                best_dash_video = Some((height, url.to_string()));
-                dlog!("[DEBUG try_stream_url] First DASH-video track found: h={} vc={}", height, vcodec);
-            }
-        }
-
-        // 收集 DASH-audio（純音頻）軌道 — 取最高 abr（音頻 bitrate）
-        if !url.is_empty() && (vcodec.is_empty() || vcodec == "none") && !acodec.is_empty() && acodec != "none" {
-            let abr = f.get("abr").and_then(|v| v.as_u64()).unwrap_or(0);
-            if let Some((cur_ab, _)) = best_dash_audio {
-                if abr > cur_ab {
-                    best_dash_audio = Some((abr, url.to_string()));
-                    dlog!("[DEBUG try_stream_url] >>> NEW BEST DASH-audio: abr={}kbit", abr);
-                }
-            } else {
-                best_dash_audio = Some((abr, url.to_string()));
-                dlog!("[DEBUG try_stream_url] First DASH-audio track found: abr={}kbit", abr);
+            let path = sub.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if !path.is_empty() {
+                subtitles.push(SubtitleTrack { language, name, path });
             }
         }
     }
 
-    dlog!("[DEBUG try_stream_url_full] Combined: {:?}, DASH-video: {:?}, DASH-audio: {:?}, manifest: {:?}, user_agent: {:?}",
-        best_combined.as_ref().map(|(h,_)| *h), best_dash_video.as_ref().map(|(h,_)| *h), best_dash_audio.is_some(), manifest_url.is_some(), user_agent.as_deref());
+    let audio_url_opt = if audio_url.is_empty() { None } else { Some(audio_url) };
+    dlog!("[DEBUG get_stream_url] STREAM source=run19.py video_url_len={} audio={} is_live={} subs={} ua_len={}",
+        video_url.len(), audio_url_opt.is_some(), is_live, subtitles.len(), user_agent.len());
 
-    Ok(StreamInfo {
-        best_combined,
-        best_dash_video,
-        best_dash_audio,
-        manifest_url,
+    Ok(StreamResult {
+        path: video_url,
+        audio_url: audio_url_opt,
         subtitles,
-        user_agent,
+        user_agent: if user_agent.is_empty() { None } else { Some(user_agent) },
     })
 }
+
 
 
 /// 启动外部播放器

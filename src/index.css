@@ -2,8 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+/* libmpv 嵌入要求：視窗與網頁背景透明，mpv 的 wid 影像輸出才能透出來 */
+html,
 body {
   margin: 0;
+  background: transparent;
 }
 
 /* 動畫：旋轉 */
