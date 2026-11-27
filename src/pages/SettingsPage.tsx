@@ -107,23 +107,65 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [savedToast, setSavedToast] = useState(false)
   const [env, setEnv] = useState<EnvironmentCheck | null>(null)
+  const [checking, setChecking] = useState(false)
   const [installingDeps, setInstallingDeps] = useState(false)
   const [installMsg, setInstallMsg] = useState('')
 
+  // 環境檢查快取：使用 localStorage 跨頁面持久化完整檢查結果
+  // 結構：{ checked: boolean, data: EnvironmentCheck }
+  const ENV_CACHE_KEY = 'noadyt-env-cache'
+  type EnvCache = { checked: boolean; data: EnvironmentCheck | null }
+  const loadEnvCache = (): EnvCache | null => {
+    try {
+      const raw = localStorage.getItem(ENV_CACHE_KEY)
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as EnvCache
+      return parsed && typeof parsed.checked === 'boolean' ? parsed : null
+    } catch {
+      return null
+    }
+  }
+  const saveEnvCache = (data: EnvironmentCheck | null): void => {
+    try {
+      localStorage.setItem(ENV_CACHE_KEY, JSON.stringify({ checked: true, data }))
+    } catch {
+      // ignore
+    }
+  }
+  const clearEnvCache = (): void => {
+    try {
+      localStorage.removeItem(ENV_CACHE_KEY)
+    } catch {
+      // ignore
+    }
+  }
+
   // 環境檢查（Python / 必要套件 / ffmpeg / 播放器）
   const refreshEnv = useCallback(async () => {
+    setChecking(true)
     try {
       const result = await checkEnvironment()
       setEnv(result)
       setPlayerPaths({ vlc: result.vlc ?? null, mpv: result.mpv ?? null })
+      saveEnvCache(result)
     } catch {
       setEnv(null)
       setPlayerPaths({ vlc: null, mpv: null })
+      saveEnvCache(null)
+    } finally {
+      setChecking(false)
     }
   }, [])
 
   useEffect(() => {
-    void refreshEnv()
+    // 進入設定頁時先嘗試從快取讀取，避免每次都重複檢查
+    const cached = loadEnvCache()
+    if (cached) {
+      setEnv(cached.data)
+      setPlayerPaths({ vlc: cached.data?.vlc ?? null, mpv: cached.data?.mpv ?? null })
+    } else {
+      void refreshEnv()
+    }
   }, [refreshEnv])
 
   /** 一鍵安裝缺的 Python 套件 */
@@ -220,8 +262,26 @@ export default function SettingsPage({ language, onBack }: SettingsPageProps) {
 
           {/* 環境狀態：Python / 必要套件 / ffmpeg / 播放器 */}
           <Section title={t('envStatus', langKey)} desc={t('envDesc', langKey)}>
+            {/* 檢查工具列：重新檢查按鈕 */}
+            <div className="flex items-center gap-2 mb-3">
+              <button
+                onClick={() => { clearEnvCache(); void refreshEnv() }}
+                disabled={checking}
+                className="px-3 py-1.5 rounded text-xs font-medium bg-[#27272a] border border-[#3f3f46] text-[#a1a1aa] hover:text-white hover:border-[#a855f7]/50 disabled:opacity-50 transition-colors"
+                title="重新檢查所有環境條件"
+              >
+                {checking ? '檢查中...' : '重新檢查環境'}
+              </button>
+              {env === null ? (
+                <span className="text-[11px] text-[#a1a1aa]">尚未檢查</span>
+              ) : (
+                <span className="text-[11px] text-[#a1a1aa]">上次檢查：已完成</span>
+              )}
+            </div>
             {env === null ? (
-              <div className="text-xs text-[#a1a1aa]">檢查中...</div>
+              <div className="text-xs text-[#a1a1aa]">
+                {checking ? t('envChecking', langKey) : '環境已檢查（點上方按鈕可重新檢測）'}
+              </div>
             ) : (
               <div className="space-y-3 text-xs">
                 {/* 總體狀態 */}

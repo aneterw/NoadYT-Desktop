@@ -9,6 +9,9 @@ interface VideoPlayerProps {
   videoId: string
   language: string
   onBack: () => void
+  onPlayNext?: (videoId: string) => void
+  autoSwitching: boolean
+  setAutoSwitching: (v: boolean) => void
 }
 
 const OBSERVED_PROPERTIES = [
@@ -32,7 +35,9 @@ interface PlayerPrefs {
   subColor: string
   subBg: string
   subBgOpacity: number
+  subPos: number
   audioDelay: number
+  autoPlayNext: boolean
 }
 
 const PLAYER_PREFS_KEY = 'noadyt-player-prefs'
@@ -43,15 +48,25 @@ const DEFAULT_PREFS: PlayerPrefs = {
   subFont: 'Sans',
   subColor: '#ffffff',
   subBg: '#000000',
-  subBgOpacity: 60,
+  subBgOpacity: 50,
+  subPos: 100,
   audioDelay: 0,
+  autoPlayNext: true,
 }
 
 function loadPlayerPrefs(): PlayerPrefs {
   try {
     const raw = localStorage.getItem(PLAYER_PREFS_KEY)
     if (!raw) return DEFAULT_PREFS
-    return { ...DEFAULT_PREFS, ...(JSON.parse(raw) as Partial<PlayerPrefs>) }
+    const merged: PlayerPrefs = { ...DEFAULT_PREFS, ...(JSON.parse(raw) as Partial<PlayerPrefs>) }
+    if (typeof merged.subBgOpacity !== 'number' || !isFinite(merged.subBgOpacity)) {
+      merged.subBgOpacity = DEFAULT_PREFS.subBgOpacity
+    }
+    if (typeof merged.subPos !== 'number' || !isFinite(merged.subPos)) {
+      merged.subPos = DEFAULT_PREFS.subPos
+    }
+    if (typeof merged.autoPlayNext !== 'boolean') merged.autoPlayNext = DEFAULT_PREFS.autoPlayNext
+    return merged
   } catch {
     return DEFAULT_PREFS
   }
@@ -76,8 +91,8 @@ function withAlpha(hexColor: string, opacityPct: number): string {
   return `#${a}${hexColor.replace('#', '')}`
 }
 
-export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerProps) {
-  const { settings } = useApp()
+export default function VideoPlayer({ videoId, language, onBack, onPlayNext, autoSwitching, setAutoSwitching }: VideoPlayerProps) {
+  const { settings, searchState } = useApp()
   const { playerType, externalPlayer, maxResolution, subtitleLanguage } = settings
   const videoRef = useRef<HTMLDivElement>(null)
   const mpvInitialized = useRef(false)
@@ -122,6 +137,16 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   const [subBg, setSubBg] = useState<string>(() => loadPlayerPrefs().subBg)
   const [subBgOpacity, setSubBgOpacity] = useState<number>(() => loadPlayerPrefs().subBgOpacity)
   const [audioDelay, setAudioDelay] = useState<number>(() => loadPlayerPrefs().audioDelay)
+  const [subPos, setSubPos] = useState<number>(() => loadPlayerPrefs().subPos)
+  const [autoPlayNext, setAutoPlayNext] = useState<boolean>(() => loadPlayerPrefs().autoPlayNext)
+  // 方向鍵 seek 時，1.5 秒內不要讓 time-pos 輪詢把滑桿拉回原點
+  const lastSeekRef = useRef<number>(0)
+  // 已播過的影片 ID（供自動續播跳過，跨影片保存）
+  const playedRef = useRef<Set<string>>(new Set<string>())
+  // 防止 eof-reached 持續為 true 導致重複觸發自動輪播（解決閃爍卡住）
+  const hasTriggeredNext = useRef(false)
+  // 記錄上一輪的 eof-reached 值，只在變化瞬間觸發一次
+  const prevEof = useRef(false)
   // 字型模式：選單選「自訂…」後 mode 變 custom（選單停在「自訂」不再掉回預設）；
   // 輸入框直接填字型名，套用後跨影片保存
   const [fontMode, setFontMode] = useState<'preset' | 'custom'>(() =>
@@ -136,12 +161,12 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
     try {
       localStorage.setItem(
         PLAYER_PREFS_KEY,
-        JSON.stringify({ subOn, subSize, subFont, subColor, subBg, subBgOpacity, audioDelay }),
+        JSON.stringify({ subOn, subSize, subFont, subColor, subBg, subBgOpacity, subPos, audioDelay, autoPlayNext }),
       )
     } catch {
       // localStorage 失敗不影響播放
     }
-  }, [subOn, subSize, subFont, subColor, subBg, subBgOpacity, audioDelay])
+  }, [subOn, subSize, subFont, subColor, subBg, subBgOpacity, subPos, audioDelay, autoPlayNext])
 
   /** 量測 header＋控制列實際高度 → 換算視窗比例 → 套用給 mpv 影片邊距
    *  （控制列在影片「上方」，所以影片頂端要讓給 header＋控制列；收折時自動向下延伸） */
@@ -239,8 +264,77 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
   const applySubBg = (c: string, opacity: number) => {
     setSubBg(c)
     setSubBgOpacity(opacity)
-    // mpv 背景色用 8 位 hex（RRGGBBAA），預設 00 全透明是看不到深淺的原因，改帶透明度
+    // 字幕背景：必須先設 sub-border-style=background-box，sub-back-color 才會畫出半透明背景框（AARRGGBB，alpha 在前）
+    void command('set', ['sub-border-style', 'background-box']).catch(() => {})
     void command('set', ['sub-back-color', withAlpha(c, opacity)]).catch(() => {})
+  }
+  const applySubPos = (n: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(n)))
+    setSubPos(clamped)
+    void command('set', ['sub-pos', clamped]).catch(() => {})
+  }
+
+  // 自動續播：從搜尋結果列表挑「尚未播放」的下一支影片，輪播
+  const playNext = useCallback(() => {
+    const results = searchState.results
+    if (!results || results.length === 0) return
+    let startIndex = -1
+    for (let i = 0; i < results.length; i++) {
+      const item = results[i]
+      if ('id' in item && item.id === videoId) {
+        startIndex = i
+        break
+      }
+    }
+    // 標記目前影片為已播
+    playedRef.current.add(videoId)
+    // 找下一支未播過的（從目前之後開始，找不到就從頭找；全部播過則從頭輪播）
+    let nextIndex = -1
+    if (startIndex !== -1) {
+      for (let offset = 1; offset <= results.length; offset++) {
+        const idx = (startIndex + offset) % results.length
+        const item = results[idx]
+        if ('id' in item && !playedRef.current.has(item.id)) {
+          nextIndex = idx
+          break
+        }
+      }
+    }
+    if (nextIndex === -1) {
+      // 全部都播過了，輪回到第一支
+      nextIndex = startIndex === -1 ? 0 : (startIndex + 1) % results.length
+    }
+    const nextItem = results[nextIndex]
+    if (!nextItem || !('id' in nextItem)) return
+    setAutoSwitching(true)
+    setTimeout(() => setAutoSwitching(false), 5000)
+    void onPlayNext?.(nextItem.id)
+  }, [searchState.results, videoId, onPlayNext, setAutoSwitching])
+
+  // 自動續播開關
+  const toggleAutoPlay = () => {
+    setAutoPlayNext((prev) => {
+      const next = !prev
+      try {
+        localStorage.setItem(
+          PLAYER_PREFS_KEY,
+          JSON.stringify({
+            subOn,
+            subSize,
+            subFont,
+            subColor,
+            subBg,
+            subBgOpacity,
+            subPos,
+            audioDelay,
+            autoPlayNext: next,
+          }),
+        )
+      } catch {
+        // localStorage 失敗不影響播放
+      }
+      return next
+    })
   }
 
   /** 每秒輪詢 mpv：pause 狀態 + 影片結尾（idle-active）（比事件可靠） */
@@ -251,17 +345,23 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
       try {
         const p = await getProperty('pause', 'flag')
         if (typeof p === 'boolean') setIsPaused(p)
-        // 結尾偵測：idle-active 在影片播完/檔案結束後為 true（end-file 事件可能收不到）
+        // 結尾偵測：用 eof-reached（比 idle-active 可靠，keep-open=yes 時 idle-active 永遠 false）
+        // 只在 eof 從 false 變 true 的瞬間觸發一次，避免 eof 持續為 true 導致重複觸發自動輪播而閃爍卡住
         if (videoSeen) {
-          const idle = await getProperty('idle-active', 'flag')
-          if (idle === true) setVideoEnded(true)
+          const eof = await getProperty('eof-reached', 'flag')
+          if (eof === true && !prevEof.current && autoPlayNext && !hasTriggeredNext.current) {
+            hasTriggeredNext.current = true
+            // 自動輪播開啟時，不顯示「播放完畢」覆蓋層，直接輪播下一支影片
+            playNext()
+          }
+          prevEof.current = eof === true
         }
       } catch {
         // 讀不到不影響播放
       }
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [playerType, streamResult, internalFailed, videoSeen])
+  }, [playerType, streamResult, internalFailed, videoSeen, autoPlayNext, playNext])
 
   /** 內建播放器手動/自動備援：改用外部播放器（run19.py 邏輯，已被證實可播） */
   const launchExternal = useCallback(async () => {
@@ -437,8 +537,12 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
                 }
                 await command('set', ['sub-font-size', prefs.subSize])
                 if (prefs.subColor) await command('set', ['sub-color', prefs.subColor])
-                // 點 4：背景色帶透明度（8 位 hex），預設全透明是「看不出效果」的原因
+                // 字幕背景：必須先設 background-box，sub-back-color 才會畫出半透明背景框（AARRGGBB）
+                await command('set', ['sub-border-style', 'background-box']).catch(() => {})
                 await command('set', ['sub-back-color', withAlpha(prefs.subBg, prefs.subBgOpacity)])
+                if (typeof prefs.subPos === 'number') {
+                  await command('set', ['sub-pos', prefs.subPos]).catch(() => {})
+                }
               }
             } catch {
               // 設定套用失敗不影響播放（mpv 尚未載入字幕軌時可能暫存失敗）
@@ -449,8 +553,10 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
             // 注意：pause 變化「不要」setPlaying —— playing 是 init effect 的相依，
             // 會觸發 cleanup → destroy() 拆掉 mpv 實例（暫停就變透明、之後卡死的大 bug 根因）
             // pause 狀態由 isPaused + 每秒輪詢管理
-            if (name === 'time-pos') {
+          if (name === 'time-pos') {
               const t = typeof data === 'number' ? data : 0
+              // seek 後 1.5 秒內不讓輪詢把滑桿拉回原點（問題 2）
+              if (Date.now() - lastSeekRef.current < 1500) return
               setTimePos(t)
               // time-pos 在推進 = 影片正在播，取消備援看門狗
               if (t > 0 && !seenRef) markVideoReady()
@@ -541,14 +647,22 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
                   setError('串流中斷，嘗試重新播放中...')
                 }
               } else if (event.reason === 'eof') {
-                // 點 7：影片正常播完 → 顯示深色「播放完畢＋重播」覆蓋層，避免透明視窗看穿
-                setVideoEnded(true)
+                // 影片正常播完：自動輪播開啟時不顯示「播放完畢」覆蓋層，直接輪播下一支
+                if (autoPlayNext) {
+                  playNext()
+                } else {
+                  setVideoEnded(true)
+                }
               }
             }
           })
           unlistenEvents = unlisten
 
           await command('loadfile', [streamResult.path, 'replace'])
+          // 新影片載入：重置輪播狀態，避免舊 eof-reached 狀態殘留造成閃爍
+          hasTriggeredNext.current = false
+          prevEof.current = false
+          setVideoEnded(false)
           // 延遲補掛載：file-loaded 事件收不到時（通道不穩），2 秒後直接掛音訊/字幕，
           // 保證「有影像就有音訊」
           setTimeout(() => { void attachAudioAndSubs() }, 2000)
@@ -674,6 +788,24 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
             step={1}
             value={Math.min(timePos, duration || 0)}
             onChange={(e) => { void command('seek', [parseFloat(e.target.value), 'absolute']).catch(() => {}) }}
+            onKeyDown={(e) => {
+              let delta = 0
+              switch (e.key) {
+                case 'ArrowLeft': delta = -10; break
+                case 'ArrowRight': delta = 10; break
+                case 'Home': delta = -(duration || 0); break
+                case 'End': delta = duration || 0; break
+                default: return
+              }
+              if (e.shiftKey) {
+                if (delta === -10) delta = -5
+                if (delta === 10) delta = 5
+              }
+              const target = Math.max(0, Math.min(duration || 0, (Math.min(timePos, duration || 0) || 0) + delta))
+              lastSeekRef.current = Date.now()
+              void command('seek', [target, 'absolute']).catch(() => {})
+              setTimePos(target)
+            }}
             className="flex-1 accent-[#a855f7] cursor-pointer h-1.5"
             aria-label="seek"
           />
@@ -730,6 +862,16 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
             title={t('subSettings', language as any)}
           >
             {subOn ? t('subOn', language as any) : t('subOff', language as any)}
+          </button>
+          {/* 自動輪播開關 */}
+          <button
+            onClick={() => toggleAutoPlay()}
+            className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+              autoPlayNext ? 'bg-[#166534] text-white' : 'bg-[#27272a] border border-[#3f3f46] text-[#a1a1aa] hover:bg-[#3f3f46]'
+            }`}
+            title={autoPlayNext ? t('autoPlayNextOn', language as any) : t('autoPlayNextOff', language as any)}
+          >
+            {`自動輪播：${autoPlayNext ? '開' : '關'}`}
           </button>
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] text-[#a1a1aa]">{t('subFont', language as any)}</label>
@@ -797,17 +939,31 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
               aria-label="sub background"
             />
             {/* 背景透明度：mpv 預設背景全透明，改色看不出深淺（點 4） */}
+            <label className="text-[11px] text-[#a1a1aa]">{t('subBackground', language as any)} 透明度</label>
             <input
-              type="range"
+              type="number"
               min={0}
               max={100}
-              step={5}
               value={subBgOpacity}
               onChange={(e) => applySubBg(subBg, parseInt(e.target.value, 10) || 0)}
-              className="w-24 accent-[#a855f7] cursor-pointer h-1.5"
+              className="w-12 px-1.5 py-0.5 rounded bg-[#27272a] border border-[#3f3f46] text-white text-[11px]"
               aria-label="sub background opacity"
               title={`背景透明度 ${subBgOpacity}%`}
             />
+            <span className="text-[11px] tabular-nums text-[#a1a1aa] w-8 text-right">{subBgOpacity}%</span>
+            {/* 字幕上下位置（100=最下、0=最上） */}
+            <label className="text-[11px] text-[#a1a1aa]">字幕位置</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={subPos}
+              onChange={(e) => applySubPos(parseInt(e.target.value, 10) || 0)}
+              className="w-12 px-1.5 py-0.5 rounded bg-[#27272a] border border-[#3f3f46] text-white text-[11px]"
+              aria-label="sub position"
+              title={`字幕位置 ${subPos}（100=最下、0=最上）`}
+            />
+            <span className="text-[11px] tabular-nums text-[#a1a1aa] w-8 text-right">{subPos}</span>
           </div>
           {/* 診斷：mpv 影像輸出裝置 + 最近 log */}
           <details className="ml-2 text-xs">
@@ -856,6 +1012,22 @@ export default function VideoPlayer({ videoId, language, onBack }: VideoPlayerPr
         {!videoReady && !internalFailed && (
           <div className="absolute inset-0 bg-[#09090b]" />
         )}
+        {/* 自動輪播中：顯示「正在播放下一個影片」提示，並提供返回影片列表按鈕 */}
+        {autoSwitching && !internalFailed && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-6 bg-[#09090b]/90 backdrop-blur z-20">
+            <div className="px-4 py-3 rounded-lg bg-[#18181b] border border-[#27272a] text-[#a855f7] text-sm font-medium mb-3">
+              自動輪播中
+            </div>
+            <p className="text-[#a1a1aa] text-xs mb-4">正在準備播放下一個影片...</p>
+            <button
+              onClick={() => { setAutoSwitching(false); void onBack() }}
+              className="px-6 py-2 rounded-lg bg-[#18181b] border border-[#27272a] text-[#a1a1aa] hover:text-white hover:border-[#a855f7]/50 transition-colors"
+            >
+              返回影片列表
+            </button>
+          </div>
+        )}
+
         {/* 點 7：影片播完後 mpv 停畫、透明視窗會看穿到桌面 → 深色覆蓋層 + 重播 */}
         {videoEnded && !internalFailed && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-[#09090b] z-10">

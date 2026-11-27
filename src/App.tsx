@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { AppProvider, useApp } from '@/contexts/AppContext'
 import Home from '@/pages/Home'
 import ChannelVideos from '@/pages/ChannelVideos'
@@ -7,6 +7,13 @@ import SettingsPage from '@/pages/SettingsPage'
 
 function Router() {
   const { view, setView, setSearchQuery, settings } = useApp()
+  const [autoSwitching, setAutoSwitching] = useState(false)
+
+  /** 自動輪播：切到下一支影片（留在播放器視圖，重掛 VideoPlayer 的 stream 流程） */
+  const handlePlayNext = useCallback((nextVideoId: string) => {
+    setAutoSwitching(true)
+    setView({ id: 'player', videoId: nextVideoId })
+  }, [setView])
 
   const handleBack = useCallback(() => {
     if (!view) return
@@ -39,9 +46,13 @@ function Router() {
     case 'player':
       return (
         <VideoPlayer
+          key={view.videoId}
           videoId={view.videoId!}
           language={settings.language}
           onBack={handleBack}
+          onPlayNext={handlePlayNext}
+          autoSwitching={autoSwitching}
+          setAutoSwitching={setAutoSwitching}
         />
       )
     case 'settings':

@@ -223,6 +223,8 @@ fn play_with_external_player(video_path: String, audio_url: Option<String>, subt
 
     // 分離進程，不等待播放器關閉
     dlog!("[DEBUG play_with_external_player] spawning process...");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.spawn()
         .map_err(|e| format!("無法啟動 {} 播放器: {}", player, e))?;
     dlog!("[DEBUG play_with_external_player] spawn OK");
@@ -532,10 +534,11 @@ fn python_resources_dir() -> Option<std::path::PathBuf> {
 
 fn probe_python_package(py_exe: &str, package: &str) -> bool {
     let script = format!("import {package}; print('OK')");
-    let out = Command::new(py_exe)
-        .arg("-c")
-        .arg(&script)
-        .output();
+    let mut cmd = Command::new(py_exe);
+    cmd.arg("-c").arg(&script);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let out = cmd.output();
     match out {
         Ok(o) => o.status.success()
             && String::from_utf8_lossy(&o.stdout).contains("OK"),
@@ -562,9 +565,13 @@ fn check_environment() -> EnvCheckOutput {
     let py_exe = find_python_exe();
     let (python_ok, python_path, python_version, packages) = match py_exe {
         Ok(path) => {
-            let version = Command::new(&path)
-                .arg("--version")
-                .output()
+            let version = {
+                let mut cmd = Command::new(&path);
+                cmd.arg("--version");
+                #[cfg(windows)]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                cmd.output()
+            }
                 .ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                 .filter(|v| !v.is_empty())
@@ -615,9 +622,11 @@ fn install_python_deps() -> Result<String, String> {
         "--upgrade".to_string(),
         pkg_names.iter().map(|s| s.to_string()).collect(),
     ];
-    let out = Command::new(&py_exe)
-        .args(&args)
-        .output()
+    let mut pip_cmd = Command::new(&py_exe);
+    pip_cmd.args(&args);
+    #[cfg(windows)]
+    pip_cmd.creation_flags(CREATE_NO_WINDOW);
+    let out = pip_cmd.output()
         .map_err(|e| format!("執行 pip 失敗: {}", e))?;
     let status = out.status.code().unwrap_or(-1);
     if status == 0 {
