@@ -214,27 +214,33 @@ export default function Home() {
     searchHistoryChannels,
     searchState,
     setSearchQuery,
-    setSearchLastQuery,
-    setSearchResults,
-    setSearchElapsed,
-    setSearchResultMediaType,
+    setVideoSearch,
+    setChannelSearch,
     addToSearchHistory,
     removeFromSearchHistory,
     clearSearchHistory,
   } = useApp()
 
   const { language, mediaType, searchLimit, channelLimit } = settings
-  const { query, lastQuery, results, elapsedMs, resultMediaType } = searchState
+  const { query } = searchState
+  // 影片 / 頻道各自獨立的搜尋快取：切換模式時兩份結果互不覆蓋
+  const currentSearch = mediaType === 'videos' ? searchState.videos : searchState.channels
+  const setSearchBucket = mediaType === 'videos' ? setVideoSearch : setChannelSearch
   const [searching, setSearching] = useState(false)
   const [error, setError] = useState('')
 
-  // 只有当结果类型与当前媒体类型匹配时才显示列表
-  const showResults = resultMediaType === mediaType && results.length > 0
+  // 切換模式時清掉上一個模式的 spinner / 錯誤提示（背景搜尋仍會寫回原 bucket）
+  useEffect(() => {
+    setSearching(false)
+    setError('')
+  }, [mediaType])
 
-  const elapsedLabel = elapsedMs != null ? `${(elapsedMs / 1000).toFixed(1)}` : null
+  const showResults = currentSearch.results.length > 0
+
+  const elapsedLabel = currentSearch.elapsedMs != null ? `${(currentSearch.elapsedMs / 1000).toFixed(1)}` : null
 
   const resultsLabel = showResults
-    ? `${lastQuery ? `「${lastQuery}」 · ` : ''}${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${results.length} 個影片` : `找到 ${results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${results.length} 個頻道` : `找到 ${results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
+    ? `${currentSearch.lastQuery ? `「${currentSearch.lastQuery}」 · ` : ''}${mediaType === 'videos' ? (language === 'zh-Hant' ? `找到 ${currentSearch.results.length} 個影片` : `找到 ${currentSearch.results.length} 个影片`) : (language === 'zh-Hant' ? `找到 ${currentSearch.results.length} 個頻道` : `找到 ${currentSearch.results.length} 个频道`)}${elapsedLabel ? ` · ${elapsedLabel} 秒` : ''}`
     : ''
 
   const runSearch = useCallback(async (kw: string) => {
@@ -243,41 +249,34 @@ export default function Home() {
     setSearching(true)
     setError('')
     addToSearchHistory(trimmed, mediaType)
-    // 搜尋一開始就清空搜尋框（下拉歷史同步收起來），關鍵字記錄在 lastQuery 供狀態列顯示
+    // 搜尋一開始就清空搜尋框（下拉歷史同步收起來）；
+    // 只清空「目前模式」的 bucket，另一份快取原封不動
     setSearchQuery('')
-    setSearchLastQuery(trimmed)
-    setSearchResults([])
-    setSearchElapsed(null)
-    setSearchResultMediaType(null)
+    setSearchBucket({ lastQuery: trimmed, results: [], elapsedMs: null })
     const started = performance.now()
     try {
       const limit = mediaType === 'videos' ? searchLimit : channelLimit
       const found = mediaType === 'videos'
         ? await searchVideos(trimmed, limit)
         : await searchChannels(trimmed, limit)
-      setSearchResults(found)
-      setSearchResultMediaType(mediaType)
-      setSearchElapsed(performance.now() - started)
+      setSearchBucket({ results: found, elapsedMs: performance.now() - started })
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       setError(message)
-      setSearchElapsed(performance.now() - started)
+      setSearchBucket({ elapsedMs: performance.now() - started })
     } finally {
       setSearching(false)
     }
-  }, [mediaType, searchLimit, channelLimit, addToSearchHistory, setSearchQuery, setSearchLastQuery, setSearchResults, setSearchElapsed, setSearchResultMediaType])
+  }, [mediaType, searchLimit, channelLimit, addToSearchHistory, setSearchQuery, setSearchBucket])
 
   return (
     <div className="min-h-screen bg-[#09090b] text-[#e4e4e7] flex flex-col">
       <header className="border-b border-[#27272a] bg-[#09090b]/80 backdrop-blur sticky top-0 z-50">
         <div className="flex items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-[#a855f7] flex items-center justify-center">
-              <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
-              </svg>
-            </div>
-            <span className="text-xl font-bold tracking-tight">{t('appName', language as any)}</span>
+            <span className="text-xl font-bold tracking-tight">
+              {t('appName', language as any)} {t(mediaType === 'videos' ? 'videos' : 'channels', language as any)}
+            </span>
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -310,12 +309,12 @@ export default function Home() {
           language={language}
           mediaType={mediaType}
           query={query}
-          lastQuery={lastQuery}
+          lastQuery={currentSearch.lastQuery}
           onQueryChange={setSearchQuery}
           onSearch={runSearch}
           searching={searching}
           error={error}
-          results={results}
+          results={currentSearch.results}
           showResults={showResults}
           resultsLabel={resultsLabel}
           searchHistoryVideos={searchHistoryVideos}

@@ -71,7 +71,7 @@ function Router() {
         break
       case 'home':
         // 在首頁時：如果是頻道模式且有頻道搜索結果，雙擊退出
-        if (settings.mediaType === 'channels' && searchState.resultMediaType === 'channels' && searchState.results.length > 0) {
+        if (settings.mediaType === 'channels' && searchState.channels.results.length > 0) {
           if (now - lastBackPress < 2000 && exitWarned) {
             // 2秒內第二次按下 → 真正退出
             void exitApp()
@@ -97,9 +97,8 @@ function Router() {
     view, 
     setView, 
     setSearchQuery, 
-    settings.mediaType, 
-    searchState.resultMediaType, 
-    searchState.results.length,
+    settings.mediaType,
+    searchState.channels.results.length,
     lastChannel,
     exitWarned,
     lastBackPress,
@@ -115,7 +114,7 @@ function Router() {
       const isBackKey = e.key === 'Backspace' || e.key === 'Escape' || e.key === 'BrowserBack'
       if (!isBackKey) return
       
-      if (view?.id === 'home' && settings.mediaType === 'channels' && searchState.resultMediaType === 'channels' && searchState.results.length > 0) {
+      if (view?.id === 'home' && settings.mediaType === 'channels' && searchState.channels.results.length > 0) {
         e.preventDefault()
         handleBack()
       }
@@ -123,7 +122,7 @@ function Router() {
     
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [view, settings.mediaType, searchState.resultMediaType, searchState.results.length, handleBack])
+  }, [view, settings.mediaType, searchState.channels.results.length, handleBack])
 
   const dismissExitToast = useCallback(() => {
     setExitWarned(false)
@@ -167,7 +166,7 @@ function Router() {
         }
       })()}
       <ExitToast
-        visible={exitWarned && view?.id === 'home' && settings.mediaType === 'channels' && searchState.resultMediaType === 'channels' && searchState.results.length > 0}
+        visible={exitWarned && view?.id === 'home' && settings.mediaType === 'channels' && searchState.channels.results.length > 0}
         message={t('pressBackAgainToExit', settings.language as any) || '再按一次返回鍵將退出應用'}
         onDismiss={dismissExitToast}
       />

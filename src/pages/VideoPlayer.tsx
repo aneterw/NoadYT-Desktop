@@ -566,19 +566,25 @@ export default function VideoPlayer({ videoId, language, onBack, onPlayNext, aut
           })
 
           // 診斷：mpv 目前用的影像輸出裝置（video-vo，例如 wid / d3d11 / ...）
-          // 讀取失敗也記錄下來（之前被 catch 吞掉，所以一直顯示「未知」）
+          // 此 build 常讀不到 video-vo（影片正常顯示時也會失敗），純診斷用；
+          // 失敗只記錄一次，避免 t3s/t8s 重複 spam
+          let voFailureLogged = false
           const readVideoVo = async (tag: string) => {
             let desc = 'n/a'
             try {
               const v = await getProperty('video-vo', 'string')
               desc = v == null ? 'null' : Array.isArray(v) ? v.join('|') : String(v)
               setVideoVo(desc || '（空值）')
+              setDiagLog((prev) => [...prev.slice(-40), `[diag] ${tag} video-vo => ${desc || '（空值）'}`])
             } catch (e: unknown) {
               const m = e instanceof Error ? e.message : String(e)
               desc = `讀取失敗: ${m}`.slice(0, 80)
               setVideoVo(desc)
+              if (!voFailureLogged) {
+                voFailureLogged = true
+                setDiagLog((prev) => [...prev.slice(-40), `[diag] ${tag} video-vo ${desc}`])
+              }
             }
-            setDiagLog((prev) => [...prev.slice(-40), `[diag] ${tag} video-vo => ${desc}`])
           }
           void readVideoVo('t0')
           setTimeout(() => { void readVideoVo('t3s') }, 3000)
@@ -611,7 +617,7 @@ export default function VideoPlayer({ videoId, language, onBack, onPlayNext, aut
                 }
                 if (subs.length > 0) {
                   await setProperty('sid', 1).catch(() => {
-                    setDiagLog((prev) => [...prev.slice(-40), '[diag] sid 設定略過（無可選字幕）'])
+                    setDiagLog((prev) => [...prev.slice(-40), '[diag] sid=1 設定失敗（可能無可選字幕軌），字幕可能不顯示'])
                   })
                   const savedPrefs = loadPlayerPrefs()
                   void command('set', ['sub', savedPrefs.subOn ? 1 : 0]).catch(() => {})

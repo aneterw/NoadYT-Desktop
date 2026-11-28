@@ -20,18 +20,24 @@ const SEARCH_STATE_KEY = 'noadyt-search-state'
 const SETTINGS_KEY = 'noadyt-settings'
 const MAX_HISTORY = 20
 
-interface SearchState {
-  /** 目前顯示在搜尋框的內容（搜尋開始後即清空，讓下拉歷史收起來） */
-  query: string
+interface MediaSearchState {
   /** 這次搜尋實際使用的關鍵字（供狀態列顯示，搜尋後保留） */
   lastQuery: string
-  /** 搜尋結果（影片或頻道） */
+  /** 搜尋結果 */
   results: (Video | Channel)[]
   /** 搜尋耗時（毫秒），null = 尚未搜尋 */
   elapsedMs: number | null
-  /** 結果對應的媒體類型，避免切換類型後顯示錯誤的列表 */
-  resultMediaType: MediaType | null
 }
+
+interface SearchState {
+  /** 目前顯示在搜尋框的內容（搜尋開始後即清空，讓下拉歷史收起來） */
+  query: string
+  /** 影片 / 頻道各自獨立的搜尋快取，切換模式互不覆蓋 */
+  videos: MediaSearchState
+  channels: MediaSearchState
+}
+
+const emptyMediaSearchState = (): MediaSearchState => ({ lastQuery: '', results: [], elapsedMs: null })
 
 function loadSearchHistory(key: string): string[] {
   try {
@@ -53,23 +59,45 @@ function saveSearchHistory(key: string, history: string[]): void {
   }
 }
 
+/** 從 bucket 讀出合法的 MediaSearchState（缺欄位補預設） */
+function loadMediaBucket(parsed: unknown): MediaSearchState {
+  const p = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>
+  return {
+    lastQuery: typeof p.lastQuery === 'string' ? p.lastQuery : '',
+    results: Array.isArray(p.results) ? p.results : [],
+    elapsedMs: typeof p.elapsedMs === 'number' ? p.elapsedMs : null,
+  }
+}
+
 function loadSearchState(): SearchState {
   try {
     const raw = localStorage.getItem(SEARCH_STATE_KEY)
     if (raw) {
-      const parsed = JSON.parse(raw) as Partial<SearchState>
-      return {
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      const fresh = {
         query: typeof parsed.query === 'string' ? parsed.query : '',
-        lastQuery: typeof parsed.lastQuery === 'string' ? parsed.lastQuery : '',
-        results: Array.isArray(parsed.results) ? parsed.results : [],
-        elapsedMs: typeof parsed.elapsedMs === 'number' ? parsed.elapsedMs : null,
-        resultMediaType: parsed.resultMediaType === 'videos' || parsed.resultMediaType === 'channels' ? parsed.resultMediaType : null,
+        videos: loadMediaBucket(parsed.videos),
+        channels: loadMediaBucket(parsed.channels),
       }
+      // 舊版格式遷移：單份 results + resultMediaType → 對應的 bucket
+      if (!parsed.videos && !parsed.channels) {
+        const legacy = parsed as Partial<SearchState> & { results?: (Video | Channel)[]; lastQuery?: string; elapsedMs?: number | null; resultMediaType?: MediaType | null }
+        if (Array.isArray(legacy.results)) {
+          const bucket: MediaSearchState = {
+            lastQuery: typeof legacy.lastQuery === 'string' ? legacy.lastQuery : '',
+            results: legacy.results,
+            elapsedMs: typeof legacy.elapsedMs === 'number' ? legacy.elapsedMs : null,
+          }
+          if (legacy.resultMediaType === 'videos') fresh.videos = bucket
+          else if (legacy.resultMediaType === 'channels') fresh.channels = bucket
+        }
+      }
+      return fresh
     }
   } catch {
     // ignore
   }
-  return { query: '', lastQuery: '', results: [], elapsedMs: null, resultMediaType: null }
+  return { query: '', videos: emptyMediaSearchState(), channels: emptyMediaSearchState() }
 }
 
 function saveSearchState(state: SearchState): void {
@@ -127,10 +155,10 @@ interface AppContextValue {
 
   // 搜尋狀態（提升到全域，頁面切換不丢失）
   setSearchQuery: (query: string) => void
-  setSearchLastQuery: (query: string) => void
-  setSearchResults: (results: (Video | Channel)[]) => void
-  setSearchElapsed: (ms: number | null) => void
-  setSearchResultMediaType: (type: MediaType | null) => void
+  /** 更新影片 bucket（影片搜尋結果獨立快取，切換到頻道不會被覆蓋） */
+  setVideoSearch: (patch: Partial<MediaSearchState>) => void
+  /** 更新頻道 bucket（頻道搜尋結果獨立快取，切換到影片不會被覆蓋） */
+  setChannelSearch: (patch: Partial<MediaSearchState>) => void
 
   // 設定
   setLanguage: (lang: AppLanguage) => void
@@ -198,20 +226,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setSearchState((prev) => ({ ...prev, query }))
   }, [])
 
-  const setSearchLastQuery = useCallback((query: string) => {
-    setSearchState((prev) => ({ ...prev, lastQuery: query }))
+  const setVideoSearch = useCallback((patch: Partial<MediaSearchState>) => {
+    setSearchState((prev) => ({ ...prev, videos: { ...prev.videos, ...patch } }))
   }, [])
 
-  const setSearchResults = useCallback((results: (Video | Channel)[]) => {
-    setSearchState((prev) => ({ ...prev, results }))
-  }, [])
-
-  const setSearchElapsed = useCallback((ms: number | null) => {
-    setSearchState((prev) => ({ ...prev, elapsedMs: ms }))
-  }, [])
-
-  const setSearchResultMediaType = useCallback((type: MediaType | null) => {
-    setSearchState((prev) => ({ ...prev, resultMediaType: type }))
+  const setChannelSearch = useCallback((patch: Partial<MediaSearchState>) => {
+    setSearchState((prev) => ({ ...prev, channels: { ...prev.channels, ...patch } }))
   }, [])
 
   const updateSetting = useCallback(<K extends keyof AppSettings>(key: K, value: AppSettings[K]) => {
@@ -282,10 +302,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setView,
       setIsSettingsOpen,
       setSearchQuery,
-      setSearchLastQuery,
-      setSearchResults,
-      setSearchElapsed,
-      setSearchResultMediaType,
+      setVideoSearch,
+      setChannelSearch,
       setLanguage,
       setMediaType,
       setMaxResolution,
@@ -318,10 +336,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setView,
       setIsSettingsOpen,
       setSearchQuery,
-      setSearchLastQuery,
-      setSearchResults,
-      setSearchElapsed,
-      setSearchResultMediaType,
+      setVideoSearch,
+      setChannelSearch,
       setLanguage,
       setMediaType,
       setMaxResolution,
