@@ -1,6 +1,6 @@
 {
   "productName": "NoadYT-Desktop",
-  "version": "0.5.0",
+  "version": "0.8.0",
   "identifier": "com.noadyt.desktop",
   "build": {
     "frontendDist": "../dist",
