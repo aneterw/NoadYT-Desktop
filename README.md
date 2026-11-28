@@ -19,7 +19,7 @@ NoadYT-Desktop 是一個基於 Tauri 2 + React + Python (yt-dlp) 的桌面影片
 前往 [Releases](https://github.com/aneterw/NoadYT-Desktop/releases) 頁面下載最新的 MSI 安裝程序：
 
 ```
-NoadYT-Desktop_0.1.0_x64.msi
+NoadYT-Desktop_0.8.0_x64.msi
 ```
 
 ### 系統需求
@@ -30,7 +30,7 @@ NoadYT-Desktop_0.1.0_x64.msi
 
 ### 安裝步驟
 
-1. 下載 `NoadYT-Desktop_0.1.0_x64.msi`
+1. 下載 `NoadYT-Desktop_0.8.0_x64.msi`
 2. 雙擊運行安裝程序
 3. 按照嚮導完成安裝
 4. 啟動應用程式即可使用
@@ -74,7 +74,7 @@ NoadYT-Desktop_0.1.0_x64.msi
 
 ### 方法一：直接安裝 MSI（推薦）
 
-1. 從 [Releases](https://github.com/aneterw/NoadYT-Desktop/releases) 下載 `NoadYT-Desktop_0.1.0_x64.msi`
+1. 從 [Releases](https://github.com/aneterw/NoadYT-Desktop/releases) 下載 `NoadYT-Desktop_0.8.0_x64.msi`
 2. 雙擊運行安裝程序，按照嚮導完成安裝
 3. 啟動 NoadYT-Desktop 應用程式
 4. 在搜尋框輸入關鍵字，點擊「搜尋」
@@ -121,7 +121,7 @@ npx tauri build
 
 構建完成後，MSI 安裝程序位於：
 ```
-src-tauri/target/release/bundle/msi/NoadYT-Desktop_0.1.0_x64.msi
+src-tauri/target/release/bundle/msi/NoadYT-Desktop_0.8.0_x64.msi
 ```
 
 ## 部署說明
@@ -154,7 +154,7 @@ npx tauri build
 
 構建完成後的 MSI 檔案位於：
 ```
-src-tauri/target/release/bundle/msi/NoadYT-Desktop_0.1.0_x64.msi
+src-tauri/target/release/bundle/msi/NoadYT-Desktop_0.8.0_x64.msi
 ```
 
 ### 部署檢查清單
