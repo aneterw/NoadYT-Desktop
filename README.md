@@ -1,8 +1,10 @@
 # NoadYT-Desktop
 
-**語言 / Language**: [🇹🇼 繁體中文](#繁體中文) | [🇺🇸 English](#english)
+**語言 / Language**: [🇹🇼 繁體中文](#chinese) | [🇺🇸 English](#english)
 
 ---
+
+<a id="chinese"></a>
 
 ## 🇹🇼 繁體中文
 
@@ -168,9 +170,11 @@ NoadYT-Desktop/
 
 歡迎提交 Issue 和 Pull Request。
 
-[⬆ 回到頂端 / Back to top](#noadyt-desktop)
+[⬆ 回到頂端](#) · [🇺🇸 English](#english)
 
 ---
+
+<a id="english"></a>
 
 ## 🇺🇸 English
 
@@ -336,7 +340,7 @@ This project is licensed under the [MIT License](LICENSE).
 
 Issues and PRs are welcome.
 
-[⬆ 回到頂端 / Back to top](#noadyt-desktop)
+[⬆ Back to top](#) · [🇹🇼 繁體中文](#chinese)
 
 ---
 
