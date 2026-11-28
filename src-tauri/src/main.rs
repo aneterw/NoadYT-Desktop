@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tauri::command;
 use tauri::Builder;
+use tauri::Manager;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -696,6 +697,44 @@ fn get_channel_videos(channel_url: String) -> Result<SearchVideosOutput, String>
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_libmpv::init())
+        .on_page_load(|webview, payload| {
+            // 頁面載入完成（Finished）再顯示視窗。
+            // 注意：webview 初始化完成前呼叫 show() 會被 wry 蓋掉（實測 0.2s 時的
+            // show() 回傳 Ok 但視窗仍隱藏），所以延遲 400ms（初始化已完成）再 show。
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+            {
+                let webview = webview.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    // 用 window_ref()（Window::show 路徑）而非 webview.show()（wry dispatcher）：
+                    // 實測 dispatcher 路徑的 show() 在此版本不生效，Window::show 才有效
+                    let r = webview.window_ref().show();
+                    dlog!("[BOOT] page_load(Finished)+400ms window.show()={}",
+                        if r.is_ok() { "ok" } else { "ERR" });
+                });
+            }
+        })
+        .setup(|app| {
+            // 啟動時視窗維持隱藏（config visible:false）：
+            // 透明視窗 + WebView2 未上色前，桌面會透出來（反白）。
+            dlog!("[BOOT] setup: main 視窗已建立（隱藏狀態），等待頁面載入完成再顯示");
+            if let Some(window) = app.get_webview_window("main") {
+                // 安全網：前端 5 秒內沒載入完成（JS 掛掉/載入失敗）就強制顯示，
+                // 避免視窗永遠藏起來關不掉。
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    match window.is_visible() {
+                        Ok(false) => {
+                            dlog!("[BOOT] 5s 內前端未載入，安全網強制顯示視窗");
+                            let _ = window.show();
+                        }
+                        _ => {}
+                    }
+                });
+            }
+            Ok(())
+        })
         // 關閉安全網：libmpv plugin 在視窗關閉時會 prevent_close 並背景 destroy mpv 實例；
         // 若內建播放器播放失敗/卡住導致 destroy 阻塞，視窗將永遠關不了。
         // 這裡另起一個守護線程：正常關閉時程序先結束、線程隨之消失；
