@@ -13,7 +13,7 @@ interface ChannelVideosProps {
 }
 
 export default function ChannelVideos({ channel, language, onVideoSelect, onBack }: ChannelVideosProps) {
-  const { settings, setPlaybackPool, setLastChannel } = useApp()
+  const { settings, playbackPool, lastChannel, setPlaybackPool, setLastChannel } = useApp()
   const [videos, setVideos] = useState<Video[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -47,7 +47,15 @@ export default function ChannelVideos({ channel, language, onVideoSelect, onBack
   }, [channelUrl, settings.channelLimit, setPlaybackPool, setLastChannel, channel])
 
   useEffect(() => {
+    // 從播放器返回同一頻道時：playbackPool 已存有該頻道的影片列表，
+    // 直接還原、不重新搜尋；首次進入或切換到不同頻道才抓
+    if (lastChannel?.channelId === channel.channelId && playbackPool.length > 0) {
+      setVideos(playbackPool.filter(v => v.availability !== 'subscriber_only'))
+      setLoading(false)
+      return
+    }
     loadVideos()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadVideos])
 
   return (
