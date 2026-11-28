@@ -807,6 +807,15 @@ export const translations: Translations = {
     'es': 'Español',
   },
 
+  // 退出確認
+  pressBackAgainToExit: {
+    'zh-Hant': '再按一次返回鍵將退出應用',
+    'zh-Hans': '再按一次返回键将退出应用',
+    'en': 'Press back again to exit the app',
+    'ja': 'もう一度戻るキーを押すとアプリを終了します',
+    'es': 'Presione atrás de nuevo para salir de la aplicación',
+  },
+
   // External player labels
   playerVLC: {
     'zh-Hant': 'VLC',

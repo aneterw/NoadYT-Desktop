@@ -6,6 +6,7 @@ export interface Video {
   duration?: number | null
   viewCount?: number | null
   channelId?: string | null
+  availability?: string | null
 }
 
 export interface Channel {
@@ -14,6 +15,7 @@ export interface Channel {
   followerCount?: number | null
   description?: string | null
   thumbnail?: string | null
+  channelUrl?: string | null
 }
 
 export interface SubtitleTrack {
@@ -71,6 +73,12 @@ export interface SearchVideosOutput {
   error?: string | null
 }
 
+export interface SearchChannelsOutput {
+  ok: boolean
+  data: Channel[]
+  error?: string | null
+}
+
 export interface StreamUrlInput {
   videoId: string
   resolution: MaxResolution
@@ -84,4 +92,5 @@ export interface ViewState {
   id: ViewId
   channel?: Channel | null
   videoId?: string | null
+  sourceListId?: string | null
 }

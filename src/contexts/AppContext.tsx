@@ -14,7 +14,8 @@ import type {
 import { languageNames } from '@/lib/i18n'
 import { clearSubtitleCache as apiClearSubtitleCache } from '@/lib/api'
 
-const SEARCH_HISTORY_KEY = 'noadyt-search-history'
+const SEARCH_HISTORY_VIDEOS_KEY = 'noadyt-search-history-videos'
+const SEARCH_HISTORY_CHANNELS_KEY = 'noadyt-search-history-channels'
 const SEARCH_STATE_KEY = 'noadyt-search-state'
 const SETTINGS_KEY = 'noadyt-settings'
 const MAX_HISTORY = 20
@@ -32,9 +33,9 @@ interface SearchState {
   resultMediaType: MediaType | null
 }
 
-function loadSearchHistory(): string[] {
+function loadSearchHistory(key: string): string[] {
   try {
-    const raw = localStorage.getItem(SEARCH_HISTORY_KEY)
+    const raw = localStorage.getItem(key)
     if (!raw) return []
     const parsed = JSON.parse(raw) as unknown[]
     if (!Array.isArray(parsed)) return []
@@ -44,9 +45,9 @@ function loadSearchHistory(): string[] {
   }
 }
 
-function saveSearchHistory(history: string[]): void {
+function saveSearchHistory(key: string, history: string[]): void {
   try {
-    localStorage.setItem(SEARCH_HISTORY_KEY, JSON.stringify(history))
+    localStorage.setItem(key, JSON.stringify(history))
   } catch {
     // ignore
   }
@@ -112,9 +113,14 @@ const DEFAULT_SETTINGS: AppSettings = {
 interface AppContextValue {
   settings: AppSettings
   view: ViewState | null
-  searchHistory: string[]
+  searchHistoryVideos: string[]
+  searchHistoryChannels: string[]
   searchState: SearchState
   isSettingsOpen: boolean
+  playbackPool: Video[]
+  exitWarned: boolean
+  lastBackPress: number
+  lastChannel: Channel | null
 
   setView: (view: ViewState | null) => void
   setIsSettingsOpen: (open: boolean) => void
@@ -139,9 +145,20 @@ interface AppContextValue {
 
   clearSubtitleCache: () => Promise<boolean>
 
-  addToSearchHistory: (keyword: string) => void
-  removeFromSearchHistory: (keyword: string) => void
-  clearSearchHistory: () => void
+  // 搜尋歷史（分離影片/頻道）
+  addToSearchHistory: (keyword: string, mediaType: MediaType) => void
+  removeFromSearchHistory: (keyword: string, mediaType: MediaType) => void
+  clearSearchHistory: (mediaType: MediaType) => void
+
+  // 播放池
+  setPlaybackPool: (videos: Video[]) => void
+
+  // 雙擊退出確認
+  setExitWarned: (warned: boolean) => void
+  setLastBackPress: (time: number) => void
+
+  // 最後選中的頻道
+  setLastChannel: (channel: Channel | null) => void
 }
 
 const AppContext = createContext<AppContextValue | null>(null)
@@ -150,8 +167,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings() || DEFAULT_SETTINGS)
   const [view, setView] = useState<ViewState | null>({ id: 'home' })
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-  const [searchHistory, setSearchHistory] = useState<string[]>(() => loadSearchHistory())
+  const [searchHistoryVideos, setSearchHistoryVideos] = useState<string[]>(() => loadSearchHistory(SEARCH_HISTORY_VIDEOS_KEY))
+  const [searchHistoryChannels, setSearchHistoryChannels] = useState<string[]>(() => loadSearchHistory(SEARCH_HISTORY_CHANNELS_KEY))
   const [searchState, setSearchState] = useState<SearchState>(() => loadSearchState())
+  const [playbackPool, setPlaybackPool] = useState<Video[]>([])
+  const [exitWarned, setExitWarned] = useState(false)
+  const [lastBackPress, setLastBackPress] = useState<number>(0)
+  const [lastChannel, setLastChannel] = useState<Channel | null>(null)
 
   // 設定變動即持久化（含每次修改自動存檔）
   useEffect(() => {
@@ -160,8 +182,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   // 搜尋歷史變動即持久化
   useEffect(() => {
-    saveSearchHistory(searchHistory)
-  }, [searchHistory])
+    saveSearchHistory(SEARCH_HISTORY_VIDEOS_KEY, searchHistoryVideos)
+  }, [searchHistoryVideos])
+
+  useEffect(() => {
+    saveSearchHistory(SEARCH_HISTORY_CHANNELS_KEY, searchHistoryChannels)
+  }, [searchHistoryChannels])
 
   // 搜尋狀態變動即持久化（返回/重啟後仍可恢復）
   useEffect(() => {
@@ -209,30 +235,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return apiClearSubtitleCache()
   }, [])
 
-  const addToSearchHistory = useCallback((keyword: string) => {
+  const addToSearchHistory = useCallback((keyword: string, mediaType: MediaType) => {
     const trimmed = keyword.trim()
     if (!trimmed) return
-    setSearchHistory((prev) => {
-      const filtered = prev.filter((item) => item !== trimmed)
-      return [trimmed, ...filtered].slice(0, MAX_HISTORY)
-    })
+    if (mediaType === 'videos') {
+      setSearchHistoryVideos((prev) => {
+        const filtered = prev.filter((item) => item !== trimmed)
+        return [trimmed, ...filtered].slice(0, MAX_HISTORY)
+      })
+    } else {
+      setSearchHistoryChannels((prev) => {
+        const filtered = prev.filter((item) => item !== trimmed)
+        return [trimmed, ...filtered].slice(0, MAX_HISTORY)
+      })
+    }
   }, [])
 
-  const removeFromSearchHistory = useCallback((keyword: string) => {
-    setSearchHistory((prev) => prev.filter((item) => item !== keyword))
+  const removeFromSearchHistory = useCallback((keyword: string, mediaType: MediaType) => {
+    if (mediaType === 'videos') {
+      setSearchHistoryVideos((prev) => prev.filter((item) => item !== keyword))
+    } else {
+      setSearchHistoryChannels((prev) => prev.filter((item) => item !== keyword))
+    }
   }, [])
 
-  const clearSearchHistory = useCallback(() => {
-    setSearchHistory([])
+  const clearSearchHistory = useCallback((mediaType: MediaType) => {
+    if (mediaType === 'videos') {
+      setSearchHistoryVideos([])
+    } else {
+      setSearchHistoryChannels([])
+    }
   }, [])
 
   const value = useMemo(
     () => ({
       settings,
       view,
-      searchHistory,
+      searchHistoryVideos,
+      searchHistoryChannels,
       searchState,
       isSettingsOpen,
+      playbackPool,
+      exitWarned,
+      lastBackPress,
+      lastChannel,
       setView,
       setIsSettingsOpen,
       setSearchQuery,
@@ -253,13 +299,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       addToSearchHistory,
       removeFromSearchHistory,
       clearSearchHistory,
+      setPlaybackPool,
+      setExitWarned,
+      setLastBackPress,
+      setLastChannel,
     }),
     [
       settings,
       view,
-      searchHistory,
+      searchHistoryVideos,
+      searchHistoryChannels,
       searchState,
       isSettingsOpen,
+      playbackPool,
+      exitWarned,
+      lastBackPress,
+      lastChannel,
       setView,
       setIsSettingsOpen,
       setSearchQuery,
@@ -280,6 +335,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       addToSearchHistory,
       removeFromSearchHistory,
       clearSearchHistory,
+      setPlaybackPool,
+      setExitWarned,
+      setLastBackPress,
+      setLastChannel,
     ],
   )
 

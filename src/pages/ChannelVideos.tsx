@@ -3,6 +3,7 @@ import type { Channel, Video } from '@/lib/types'
 import { getChannelVideos } from '@/lib/api'
 import { t } from '@/lib/i18n'
 import { VideoCard } from '@/components/VideoCard'
+import { useApp } from '@/contexts/AppContext'
 
 interface ChannelVideosProps {
   channel: Channel
@@ -12,9 +13,11 @@ interface ChannelVideosProps {
 }
 
 export default function ChannelVideos({ channel, language, onVideoSelect, onBack }: ChannelVideosProps) {
+  const { settings, setPlaybackPool, setLastChannel } = useApp()
   const [videos, setVideos] = useState<Video[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [elapsedMs, setElapsedMs] = useState<number | null>(null)
 
   const channelUrl = channel.channelId ? `https://www.youtube.com/channel/${channel.channelId}` : ''
 
@@ -26,16 +29,22 @@ export default function ChannelVideos({ channel, language, onVideoSelect, onBack
     }
     setLoading(true)
     setError('')
+    const started = performance.now()
     try {
-      const result = await getChannelVideos(channelUrl)
-      setVideos(result)
+      const result = await getChannelVideos(channelUrl, settings.channelLimit)
+      // 過濾會員專属影片（雖然後端已過濾，這裡再做一層保險）
+      const filtered = result.filter(v => v.availability !== 'subscriber_only')
+      setVideos(filtered)
+      setPlaybackPool(filtered)
+      setLastChannel(channel)
+      setElapsedMs(performance.now() - started)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
       setError(message)
     } finally {
       setLoading(false)
     }
-  }, [channelUrl])
+  }, [channelUrl, settings.channelLimit, setPlaybackPool, setLastChannel, channel])
 
   useEffect(() => {
     loadVideos()
@@ -95,6 +104,7 @@ export default function ChannelVideos({ channel, language, onVideoSelect, onBack
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-bold text-[#e4e4e7]">
                 {t('resultsFound', language as any, { count: videos.length })}
+                {elapsedMs != null && ` · ${(elapsedMs / 1000).toFixed(1)} 秒`}
               </h2>
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
@@ -103,7 +113,7 @@ export default function ChannelVideos({ channel, language, onVideoSelect, onBack
                   key={video.id}
                   video={video}
                   language={language}
-                  onPlay={onVideoSelect}
+                  onPlay={() => onVideoSelect(video)}
                   onOpenChannel={() => {}}
                 />
               ))}

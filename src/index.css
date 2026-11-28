@@ -26,6 +26,21 @@ body {
   animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
+/* 動畫：Toast 滑入 */
+@keyframes slide-up {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+.animate-slide-up {
+  animation: slide-up 0.3s ease-out forwards;
+}
+
 /* WebVTT 字幕樣式（內建 libmpv 使用系統字幕，這裡供原生 <video> 參考） */
 video::cue {
   font-size: 14px !important;

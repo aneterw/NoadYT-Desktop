@@ -766,7 +766,7 @@ def _extract_best_avatar(thumbnails: list) -> Optional[str]:
 
 def _fetch_single_channel_details(basic_info: dict) -> dict:
     """取得單一頻道的詳細資訊（訂閱數、簡介、大頭貼）」"""
-    ch_id = basic_info["channel_id"]
+    ch_id = basic_info["channelId"]
     url = f"https://www.youtube.com/channel/{ch_id}"
     opts = {
         "extractor_args": {"youtube": {"player_client": ["ios", "android_tv_embedded"], "client_version": "19.29.1"}},
@@ -781,23 +781,23 @@ def _fetch_single_channel_details(basic_info: dict) -> dict:
             info = ydl.extract_info(url, download=False)
             thumbs = info.get("thumbnails", [])
             return {
-                "channel_id": ch_id,
+                "channelId": ch_id,
                 "title": basic_info["title"],
-                "follower_count": info.get("channel_follower_count"),
+                "followerCount": info.get("channel_follower_count"),
                 "description": "",
                 "thumbnail": _extract_best_avatar(thumbs),
             }
         except Exception as e:
-            print(f"[Channel] 抓取 {basic_info['title']} 失敗: {e}")
+            logger.warning(f"[Channel] 抓取 {basic_info['title']} 失敗: {e}")
             return {
-                "channel_id": ch_id, "title": basic_info["title"],
-                "follower_count": None, "description": "", "thumbnail": None,
+                "channelId": ch_id, "title": basic_info["title"],
+                "followerCount": None, "description": "", "thumbnail": None,
             }
 
 
 def search_channels(keyword: str, max_results: int = 30) -> str:
     """搜尋 YouTube 頻道，回傳 JSON 字串（格式與 search_videos 一致）"""
-    print(f"搜尋頻道：{keyword}，上限 {max_results} 個...")
+    logger.info(f"搜尋頻道：{keyword}，上限 {max_results} 個...")
     search_limit = int(max_results * 1.3)  # 稍微擴大搜尋基數，確保去重後能湊滿 max_results
     search_query = f"ytsearch{search_limit}:{keyword}"
     opts = {
@@ -820,15 +820,15 @@ def search_channels(keyword: str, max_results: int = 30) -> str:
             if cid and cid not in seen_ids:
                 seen_ids.add(cid)
                 results.append({
-                    "channel_id": cid,
+                    "channelId": cid,
                     "title": name,
-                    "follower_count": None,  # 跳過逐一抓詳情，先回傳基本結果，加快搜尋
+                    "followerCount": None,  # 跳過逐一抓詳情，先回傳基本結果，加快搜尋
                     "description": "",
                     "thumbnail": None,  # 跳過逐一抓詳情，圖片可稍後非同步載入
                 })
                 if len(results) >= max_results:
                     break
-    print(f"已找到 {len(results)} 個頻道，逐一抓詳情...")
+    logger.info(f"已找到 {len(results)} 個頻道，逐一抓詳情...")
     import concurrent.futures
     detailed = [None] * len(results)
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
@@ -863,6 +863,9 @@ def get_channel_videos(channel_url: str, max_videos: int = 40) -> str:
             for entry in (info.get("entries") or []):
                 if not entry:
                     continue
+                # ★ 过滤会员专属影片
+                if entry.get('availability') == 'subscriber_only':
+                    continue
                 vid_id = entry.get("id")
                 dur = entry.get("duration") or 0
                 h, rem = divmod(dur, 3600)
@@ -876,14 +879,15 @@ def get_channel_videos(channel_url: str, max_videos: int = 40) -> str:
                     "duration": dur,
                     "thumbnail": thumb,
                     "channel": chan_name,
-                    "channel_id": "",
+                    "channelId": "",
                     "view_count": None,
                     "url": f"https://www.youtube.com/watch?v={vid_id}",
                     "upload_date": None,
+                    "availability": entry.get("availability", "public"),
                     "_dur_str": dur_str,   # Android 端顯示用，不影響 VideoSearchResult
                 })
         except Exception as e:
-            print(f"[ChannelVideos] 錯誤: {e}")
+            logger.warning(f"[ChannelVideos] 錯誤: {e}")
     return json.dumps(videos, ensure_ascii=False)
 
 
@@ -1281,6 +1285,14 @@ if __name__ == "__main__":
             lang = sys.argv[4] if len(sys.argv) >= 5 else "auto"
             max_res = sys.argv[5] if len(sys.argv) >= 6 else "auto"
             play_video(video_id, player_pref, lang, max_res)
+        elif cmd == "--channels" and len(sys.argv) >= 3:
+            keyword = sys.argv[2]
+            max_results = int(sys.argv[3]) if len(sys.argv) >= 4 else 30
+            _emit(json.loads(search_channels(keyword, max_results)))
+        elif cmd == "--channel-videos" and len(sys.argv) >= 3:
+            channel_url = sys.argv[2]
+            max_videos = int(sys.argv[3]) if len(sys.argv) >= 4 else 40
+            _emit(json.loads(get_channel_videos(channel_url, max_videos)))
         else:
             _emit({"error": "unknown command or missing argument"})
             sys.exit(1)

@@ -18,9 +18,11 @@ interface SearchTabProps {
   results: (Video | Channel)[]
   showResults: boolean
   resultsLabel: string
-  searchHistory: string[]
+  searchHistoryVideos: string[]
+  searchHistoryChannels: string[]
   onHistoryClick: (kw: string) => void
-  onRemoveHistory: (kw: string) => void
+  onRemoveHistory: (kw: string, mediaType: MediaType) => void
+  onClearHistory: (mediaType: MediaType) => void
   onOpenVideo: (video: Video) => void
   onOpenChannel: (channel: Channel) => void
 }
@@ -37,14 +39,19 @@ function SearchTab({
   results,
   showResults,
   resultsLabel,
-  searchHistory,
+  searchHistoryVideos,
+  searchHistoryChannels,
   onHistoryClick,
   onRemoveHistory,
+  onClearHistory,
   onOpenVideo,
   onOpenChannel,
 }: SearchTabProps) {
   const [showHistory, setShowHistory] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // 根據媒體類型選擇對應的歷史記錄
+  const currentHistory = mediaType === 'videos' ? searchHistoryVideos : searchHistoryChannels
 
   // 搜尋開始（searching）或結果出現後，收起來下拉歷史，避免遮蔽畫面
   useEffect(() => {
@@ -79,7 +86,7 @@ function SearchTab({
             onKeyDown={(e) => {
               if (e.key === 'Enter') onSearch(query)
             }}
-            onFocus={() => setShowHistory(searchHistory.length > 0)}
+            onFocus={() => setShowHistory(currentHistory.length > 0)}
             className="flex-1 px-4 py-2.5 rounded-lg bg-[#18181b] border border-[#27272a] text-white placeholder-[#71717a] focus:outline-none focus:ring-2 focus:ring-[#a855f7] transition-all"
             placeholder={placeholder}
           />
@@ -92,19 +99,19 @@ function SearchTab({
           </button>
         </div>
 
-        {showHistory && searchHistory.length > 0 && (
+        {showHistory && currentHistory.length > 0 && (
           <div className="absolute z-40 top-full left-0 right-0 mt-1 bg-[#09090b]/85 backdrop-blur-md border border-[#27272a]/80 rounded-lg shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-3 py-2 border-b border-[#27272a]/60">
               <span className="text-xs text-[#a1a1aa]">{t('searchHistory', language as any)}</span>
               <button
-                onClick={() => searchHistory.forEach(onRemoveHistory)}
+                onClick={() => onClearHistory(mediaType)}
                 className="text-xs text-[#71717a] hover:text-[#a855f7] transition-colors"
               >
                 {t('clearHistory', language as any)}
               </button>
             </div>
             <ul className="max-h-64 overflow-y-auto">
-              {searchHistory.map((item, idx) => (
+              {currentHistory.map((item, idx) => (
                 <li key={idx} className="flex items-center justify-between px-3 py-2 hover:bg-[#27272a] transition-colors">
                   <button
                     onClick={() => onHistoryClick(item)}
@@ -118,7 +125,7 @@ function SearchTab({
                   <button
                     onClick={(e) => {
                       e.stopPropagation()
-                      onRemoveHistory(item)
+                      onRemoveHistory(item, mediaType)
                     }}
                     className="ml-2 p-1 rounded hover:bg-[#3f3f46] text-[#71717a] hover:text-red-400 transition-colors"
                     title={t('removeHistory', language as any)}
@@ -203,7 +210,8 @@ export default function Home() {
     settings,
     setMediaType,
     setView,
-    searchHistory,
+    searchHistoryVideos,
+    searchHistoryChannels,
     searchState,
     setSearchQuery,
     setSearchLastQuery,
@@ -212,6 +220,7 @@ export default function Home() {
     setSearchResultMediaType,
     addToSearchHistory,
     removeFromSearchHistory,
+    clearSearchHistory,
   } = useApp()
 
   const { language, mediaType, searchLimit, channelLimit } = settings
@@ -233,7 +242,7 @@ export default function Home() {
     if (!trimmed) return
     setSearching(true)
     setError('')
-    addToSearchHistory(trimmed)
+    addToSearchHistory(trimmed, mediaType)
     // 搜尋一開始就清空搜尋框（下拉歷史同步收起來），關鍵字記錄在 lastQuery 供狀態列顯示
     setSearchQuery('')
     setSearchLastQuery(trimmed)
@@ -288,7 +297,7 @@ export default function Home() {
               aria-label={t('settings', language as any)}
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </button>
@@ -309,10 +318,16 @@ export default function Home() {
           results={results}
           showResults={showResults}
           resultsLabel={resultsLabel}
-          searchHistory={searchHistory}
+          searchHistoryVideos={searchHistoryVideos}
+          searchHistoryChannels={searchHistoryChannels}
           onHistoryClick={runSearch}
           onRemoveHistory={removeFromSearchHistory}
-          onOpenVideo={(video) => setView({ id: 'player', videoId: video.id })}
+          onClearHistory={clearSearchHistory}
+          onOpenVideo={(video) => setView({ 
+            id: 'player', 
+            videoId: video.id,
+            sourceListId: 'home-videos',
+          })}
           onOpenChannel={(channel) => setView({ id: 'channel', channel })}
         />
       </main>

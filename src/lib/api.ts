@@ -3,6 +3,7 @@ import type {
   Video,
   Channel,
   SearchVideosOutput,
+  SearchChannelsOutput,
   StreamResult,
   StreamUrlInput,
 } from '@/lib/types'
@@ -45,21 +46,22 @@ export async function searchVideos(keyword: string, maxResults?: number): Promis
 
 /** 搜尋頻道 */
 export async function searchChannels(keyword: string, maxResults?: number): Promise<Channel[]> {
-  const result = await callCommand<SearchVideosOutput>('search_channels', {
+  const result = await callCommand<SearchChannelsOutput>('search_channels', {
     keyword,
     maxResults: maxResults ?? 30,
   })
   if (!result.ok) {
     throw new Error(result.error || '搜尋頻道失敗')
   }
-  return Array.isArray(result.data) ? (result.data as Channel[]) : []
+  return Array.isArray(result.data) ? result.data : []
 }
 
 /** 取得頻道內影片列表 */
-export async function getChannelVideos(channelUrl: string): Promise<Video[]> {
-  // get_channel_videos 接收字符串參數，不需要 input 包裝
+export async function getChannelVideos(channelUrl: string, maxVideos?: number): Promise<Video[]> {
+  // Tauri 2.x：JS 端參數名須為 camelCase（Rust 端 snake_case 會自動映射）
   const result = await callSimpleCommand<SearchVideosOutput>('get_channel_videos', {
-    channel_url: channelUrl,
+    channelUrl: channelUrl,
+    maxVideos: maxVideos ?? 40,
   })
   if (!result.ok) {
     throw new Error(result.error || '取得頻道影片失敗')
@@ -85,11 +87,11 @@ export async function playWithExternalPlayer(
   subtitlePaths: string[],
   player: 'vlc' | 'mpv',
 ): Promise<string> {
-  // Rust 端參數為獨立字段，使用 snake_case（Tauri 預設行為）
+  // Tauri 2.x：JS 端參數名須為 camelCase（Rust 端 video_path → videoPath）
   return callSimpleCommand<string>('play_with_external_player', {
-    video_path: videoPath,
-    audio_url: audioUrl ?? null,
-    subtitle_paths: subtitlePaths,
+    videoPath: videoPath,
+    audioUrl: audioUrl ?? null,
+    subtitlePaths: subtitlePaths,
     player,
   })
 }
@@ -136,6 +138,11 @@ export async function readBinaryFile(path: string): Promise<Uint8Array> {
 /** 以系統預設瀏覽器開啟 URL */
 export async function openUrl(url: string): Promise<boolean> {
   return callSimpleCommand<boolean>('open_url', { url })
+}
+
+/** 退出應用程式 */
+export async function exitApp(): Promise<void> {
+  return callSimpleCommand<void>('exit_app', {})
 }
 
 /** 啟動外部播放器（使用 Python run19.py 的完整播放邏輯） */

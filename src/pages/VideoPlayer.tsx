@@ -92,7 +92,7 @@ function withAlpha(hexColor: string, opacityPct: number): string {
 }
 
 export default function VideoPlayer({ videoId, language, onBack, onPlayNext, autoSwitching, setAutoSwitching }: VideoPlayerProps) {
-  const { settings, searchState } = useApp()
+  const { settings, playbackPool } = useApp()
   const { playerType, externalPlayer, maxResolution, subtitleLanguage } = settings
   const videoRef = useRef<HTMLDivElement>(null)
   const mpvInitialized = useRef(false)
@@ -274,14 +274,14 @@ export default function VideoPlayer({ videoId, language, onBack, onPlayNext, aut
     void command('set', ['sub-pos', clamped]).catch(() => {})
   }
 
-  // 自動續播：從搜尋結果列表挑「尚未播放」的下一支影片，輪播
+  // 自動續播：從播放池（playbackPool）挑「尚未播放」的下一支影片，輪播
+  // 播放池由 Home 搜尋結果或 ChannelVideos 列表設置，確保頻道內輪播只在頻道視頻中進行
   const playNext = useCallback(() => {
-    const results = searchState.results
-    if (!results || results.length === 0) return
+    const pool = playbackPool
+    if (!pool || pool.length === 0) return
     let startIndex = -1
-    for (let i = 0; i < results.length; i++) {
-      const item = results[i]
-      if ('id' in item && item.id === videoId) {
+    for (let i = 0; i < pool.length; i++) {
+      if (pool[i].id === videoId) {
         startIndex = i
         break
       }
@@ -291,10 +291,10 @@ export default function VideoPlayer({ videoId, language, onBack, onPlayNext, aut
     // 找下一支未播過的（從目前之後開始，找不到就從頭找；全部播過則從頭輪播）
     let nextIndex = -1
     if (startIndex !== -1) {
-      for (let offset = 1; offset <= results.length; offset++) {
-        const idx = (startIndex + offset) % results.length
-        const item = results[idx]
-        if ('id' in item && !playedRef.current.has(item.id)) {
+      for (let offset = 1; offset <= pool.length; offset++) {
+        const idx = (startIndex + offset) % pool.length
+        const item = pool[idx]
+        if (!playedRef.current.has(item.id)) {
           nextIndex = idx
           break
         }
@@ -302,14 +302,14 @@ export default function VideoPlayer({ videoId, language, onBack, onPlayNext, aut
     }
     if (nextIndex === -1) {
       // 全部都播過了，輪回到第一支
-      nextIndex = startIndex === -1 ? 0 : (startIndex + 1) % results.length
+      nextIndex = startIndex === -1 ? 0 : (startIndex + 1) % pool.length
     }
-    const nextItem = results[nextIndex]
-    if (!nextItem || !('id' in nextItem)) return
+    const nextItem = pool[nextIndex]
+    if (!nextItem) return
     setAutoSwitching(true)
     setTimeout(() => setAutoSwitching(false), 5000)
     void onPlayNext?.(nextItem.id)
-  }, [searchState.results, videoId, onPlayNext, setAutoSwitching])
+  }, [playbackPool, videoId, onPlayNext, setAutoSwitching])
 
   // 自動續播開關
   const toggleAutoPlay = () => {

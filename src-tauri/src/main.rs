@@ -247,7 +247,8 @@ fn search_videos(input: SearchVideosInput) -> Result<SearchVideosOutput, String>
 /// 搜尋頻道
 #[command]
 fn search_channels(input: SearchVideosInput) -> Result<SearchVideosOutput, String> {
-    let json = run_extractor(&["--channels", &input.keyword])?;
+    let max_results = input.maxResults.unwrap_or(30).to_string();
+    let json = run_extractor(&["--channels", &input.keyword, &max_results])?;
     let data: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
     Ok(SearchVideosOutput {
         ok: true,
@@ -479,6 +480,12 @@ fn open_url(url: String) -> Result<bool, String> {
     }
 }
 
+/// 退出应用程序（用于频道列表双击返回键退出）
+#[command]
+fn exit_app() -> Result<(), String> {
+    std::process::exit(0);
+}
+
 /// 检查 Python 执行环境
 #[command]
 fn check_python_environment() -> Result<serde_json::Value, String> {
@@ -652,39 +659,9 @@ fn write_log(message: String) -> Result<bool, String> {
 
 /// 获取频道视频列表
 #[command]
-fn get_channel_videos(channel_url: String) -> Result<SearchVideosOutput, String> {
-    // 从URL中提取channel_id或handle
-    let channel_id = if channel_url.contains("/channel/") {
-        channel_url.split("/channel/").nth(1)
-            .and_then(|s| s.split('/').next())
-            .unwrap_or("")
-    } else if channel_url.contains("/c/") {
-        channel_url.split("/c/").nth(1)
-            .and_then(|s| s.split('/').next())
-            .unwrap_or("")
-    } else if channel_url.contains("/@") {
-        channel_url.split("/@").nth(1)
-            .and_then(|s| s.split('/').next())
-            .unwrap_or("")
-    } else {
-        ""
-    };
-
-    if channel_id.is_empty() {
-        return Ok(SearchVideosOutput {
-            ok: false,
-            data: serde_json::Value::Array(vec![]),
-            error: Some("Could not parse channel ID from URL".to_string()),
-        });
-    }
-
-    // 使用yt-dlp搜索频道视频
-    let search_query = format!("site:youtube.com/watch?v={}", channel_id);
-    let args = vec![
-        "--search",
-        &search_query,
-        "60",
-    ];
+fn get_channel_videos(channel_url: String, max_videos: Option<u32>) -> Result<SearchVideosOutput, String> {
+    let max_v = max_videos.unwrap_or(40).to_string();
+    let args = vec!["--channel-videos", &channel_url, &max_v];
     let json = run_extractor(&args)?;
     let data: serde_json::Value = serde_json::from_str(&json).unwrap_or(serde_json::Value::Null);
     Ok(SearchVideosOutput {
@@ -764,6 +741,7 @@ fn main() {
             write_log,
             read_binary_file,
             get_channel_videos,
+            exit_app,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
